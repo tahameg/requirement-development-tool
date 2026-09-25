@@ -6,7 +6,7 @@ import path from 'node:path';
 const platform = process.argv[2];
 if (!['linux', 'win32'].includes(platform)) throw new Error('Choose linux or win32');
 const stage = path.resolve(`offline/staging/hlr-dev-${platform}-x64`);
-for (const entry of ['src', 'tests', 'scripts', 'build', 'package.json', 'package-lock.json', 'tsconfig.json', 'vite.config.ts', 'vitest.config.ts', 'electron-builder.yml', 'README.md', 'Agents.md', '.gitignore']) cpSync(entry, path.join(stage, entry), { recursive: true });
+for (const entry of ['src', 'tests', 'scripts', 'build', 'package.json', 'package-lock.json', 'tsconfig.json', 'vite.config.ts', 'vitest.config.ts', 'electron-builder.yml', 'README.md', 'Agents.md', '.gitignore', 'Dockerfile', '.dockerignore']) cpSync(entry, path.join(stage, entry), { recursive: true });
 for (const entry of readdirSync('offline')) if (/\.(mjs|md|sh|ps1)$/.test(entry)) cpSync(path.join('offline', entry), path.join(stage, 'offline', entry));
 const manifest = {};
 function walk(directory, relative = '') {

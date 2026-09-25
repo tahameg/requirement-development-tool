@@ -11,7 +11,7 @@ const pkg = JSON.parse(readFileSync('package.json', 'utf8'));
 const stage = path.resolve(`offline/staging/hlr-dev-${platform}-x64`);
 if (existsSync(stage)) throw new Error(`Bundle staging already exists: ${stage}. Move it aside before creating a fresh bundle.`);
 mkdirSync(stage, { recursive: true });
-const entries = ['src', 'tests', 'scripts', 'build', 'package.json', 'package-lock.json', 'tsconfig.json', 'vite.config.ts', 'vitest.config.ts', 'electron-builder.yml', 'README.md', 'Agents.md', '.gitignore'];
+const entries = ['src', 'tests', 'scripts', 'build', 'package.json', 'package-lock.json', 'tsconfig.json', 'vite.config.ts', 'vitest.config.ts', 'electron-builder.yml', 'README.md', 'Agents.md', '.gitignore', 'Dockerfile', '.dockerignore'];
 for (const entry of entries) cpSync(entry, path.join(stage, entry), { recursive: true });
 mkdirSync(path.join(stage, 'offline'), { recursive: true });
 for (const entry of readdirSync('offline')) if (/\.(mjs|md|sh|ps1)$/.test(entry)) cpSync(path.join('offline', entry), path.join(stage, 'offline', entry));
