@@ -1,0 +1,40 @@
+import { it, expect } from 'vitest';
+import { mkdtempSync, rmSync, existsSync, writeFileSync } from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import { AppConfig } from '../../src/main/config/appConfig.js';
+import { DesktopService } from '../../src/main/services/desktopService.js';
+import { loadWorkspace } from '../../src/main/services/workspaceService.js';
+it('creates, opens and saves workspaces; persists settings; protects existing destinations', async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), 'hlr-service-'));
+  const service = new DesktopService(new AppConfig(path.join(root, 'config.ini')));
+  try {
+    expect(service.state().current).toBeNull();
+    await expect(service.changeHierarchy({})).rejects.toThrow('Open a project');
+    await expect(service.save()).rejects.toThrow('Open a project');
+    await expect(service.updateProject({})).rejects.toThrow('Open a project');
+    const project = path.join(root, 'Project.hlr');
+    await service.create(project, 'Project', 'GS');
+    expect(service.state().current?.index.status).toBe('ready');
+    expect(existsSync(path.join(project, '.hlr/cache.sqlite'))).toBe(true);
+    await expect(service.create(project, 'Overwrite', '')).rejects.toThrow();
+    const config = service.state().current!.workspace.config;
+    await service.updateProject({ ...config, projectName: 'Renamed' });
+    expect((await loadWorkspace(project)).config.projectName).toBe('Renamed');
+    service.saveSettings({ theme: 'high-contrast', language: 'en', auto_save_interval_sec: 60 });
+    expect(service.config.get().general.theme).toBe('high-contrast');
+    await service.changeHierarchy({ action: 'addModule', objectType: 'REQUIREMENT', parentId: null, name: 'Persisted module', prefix: 'M', description: 'Scope' });
+    const moduleId = service.state().current!.workspace.domains.REQUIREMENT.modules[0]!.id;
+    await service.changeHierarchy({ action: 'addFunction', objectType: 'REQUIREMENT', parentId: moduleId, name: 'Persisted function', prefix: 'FN', description: 'Function scope' });
+    expect((await loadWorkspace(project)).domains.REQUIREMENT.functions[0]!.modulePath).toEqual(['Persisted module']);
+    await expect(service.changeHierarchy({ action: 'addFunction', objectType: 'REQUIREMENT', parentId: moduleId, name: 'Persisted function', prefix: 'OTHER', description: '' })).rejects.toThrow('unique');
+    expect(service.state().current!.workspace.domains.REQUIREMENT.functions).toHaveLength(1);
+    await service.save(); service.close();
+    writeFileSync(path.join(project, '.hlr/cache.sqlite'), 'broken');
+    await service.open(project);
+    expect(service.state().current!.index.status).toBe('ready');
+    await expect(service.open(path.join(root, 'missing'))).rejects.toThrow();
+    expect(service.state().current!.workspace.config.projectName).toBe('Renamed');
+    expect(service.config.get().recentProjects).toEqual([project]);
+  } finally { service.close(); rmSync(root, { recursive: true, force: true }); }
+});

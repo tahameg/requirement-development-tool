@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Production build outputs
+dist/
+build/uninstall-files.nsh
+
+# Packaging and distribution binaries
+release/
+*.AppImage
+*.deb
+*.exe
+
+# Test artifacts and coverage
+coverage/
+*.tmp
+*.log
+
+# Offline preparation caches and distribution bundles
+offline/bundles/
+offline/staging/
+offline/cache/
+offline/native/**/*.node
+
+# OS and editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

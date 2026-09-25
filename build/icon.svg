@@ -1,0 +1,43 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0f172a"/>
+      <stop offset="100%" stop-color="#1e293b"/>
+    </linearGradient>
+    <linearGradient id="accentGrad" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="100%" stop-color="#38bdf8"/>
+    </linearGradient>
+  </defs>
+  
+  <!-- Outer rounded background -->
+  <rect x="16" y="16" width="480" height="480" rx="96" ry="96" fill="url(#bgGrad)" stroke="#38bdf8" stroke-width="8"/>
+  
+  <!-- Inner document panel -->
+  <rect x="72" y="72" width="368" height="368" rx="48" ry="48" fill="#1e293b" stroke="#475569" stroke-width="4"/>
+  
+  <!-- Top header accent -->
+  <rect x="112" y="112" width="288" height="24" rx="12" ry="12" fill="url(#accentGrad)"/>
+  
+  <!-- Requirement item 1 -->
+  <rect x="112" y="170" width="148" height="28" rx="10" ry="10" fill="#f1f5f9"/>
+  <rect x="280" y="170" width="120" height="28" rx="10" ry="10" fill="#64748b"/>
+  
+  <!-- Hierarchy branch line -->
+  <path d="M 140 198 V 244 H 170" fill="none" stroke="#38bdf8" stroke-width="6" stroke-linecap="round"/>
+  
+  <!-- Submodule / Function row -->
+  <rect x="180" y="230" width="130" height="28" rx="10" ry="10" fill="#38bdf8"/>
+  <rect x="325" y="230" width="75" height="28" rx="10" ry="10" fill="#475569"/>
+  
+  <!-- Function fx badge and description -->
+  <rect x="180" y="290" width="60" height="48" rx="12" ry="12" fill="#0284c7"/>
+  <text x="210" y="324" font-family="system-ui, sans-serif" font-weight="bold" font-size="28" fill="#ffffff" text-anchor="middle">fx</text>
+  <rect x="255" y="300" width="145" height="28" rx="10" ry="10" fill="#f1f5f9"/>
+  
+  <!-- Bottom HLR badges -->
+  <rect x="112" y="380" width="128" height="36" rx="14" ry="14" fill="#38bdf8"/>
+  <text x="176" y="406" font-family="system-ui, sans-serif" font-weight="900" font-size="22" fill="#0f172a" text-anchor="middle">HLR</text>
+  <rect x="260" y="380" width="140" height="36" rx="14" ry="14" fill="#1e3a8a"/>
+  <text x="330" y="406" font-family="system-ui, sans-serif" font-weight="bold" font-size="16" fill="#93c5fd" text-anchor="middle">OFFLINE</text>
+</svg>

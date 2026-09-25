@@ -1,0 +1,9 @@
+{
+  "platform": "linux",
+  "arch": "x64",
+  "electron": "40.10.2",
+  "electronAbi": "143",
+  "sqlite": "12.8.0",
+  "sha256": "f9b4634419577110a07e2a189d444ff13c1c7da4d01340db27571e83aaf15d27",
+  "source": "Locally rebuilt using npm run setup:desktop"
+}

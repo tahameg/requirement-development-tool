@@ -1,0 +1,9 @@
+{
+  "platform": "win32",
+  "arch": "x64",
+  "electron": "40.10.2",
+  "electronAbi": "143",
+  "sqlite": "12.8.0",
+  "sha256": "37b9c9acd2ac11428142ea660152055926c0c43dc8f2f325174237f13b6ec961",
+  "source": "https://github.com/WiseLibs/better-sqlite3/releases/download/v12.8.0/better-sqlite3-v12.8.0-electron-v143-win32-x64.tar.gz"
+}

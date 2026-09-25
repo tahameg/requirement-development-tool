@@ -1,0 +1,41 @@
+afterPack: build/afterPack.cjs
+appId: org.hlr.writing-tool
+productName: HLR Writing Tool
+directories:
+  output: release
+files:
+  - dist/**/*
+  - package.json
+  - '!node_modules/**/test/**'
+  - '!node_modules/**/tests/**'
+asar: true
+asarUnpack:
+  - '**/*.node'
+npmRebuild: false
+nodeGypRebuild: false
+extraResources:
+  - from: README.md
+    to: README.md
+linux:
+  maintainer: HLR Writing Tool contributors
+  executableName: hlr-writing-tool
+  category: Development
+  icon: build/icon.png
+  target:
+    - AppImage
+    - deb
+win:
+  icon: build/icon.ico
+  target:
+    - portable
+    - nsis
+  signAndEditExecutable: false
+nsis:
+  installerLanguages:
+    - en_US
+  script: build/installer.nsi
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  differentialPackage: false
+publish: null
