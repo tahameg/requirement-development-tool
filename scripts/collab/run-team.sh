@@ -57,5 +57,5 @@ for ((i = 1; i <= MAX_TASK_RUNS; i++)); do
   fi
 done
 
-run_agent reviewer docs/collab/roles/reviewer.md "$REVIEW_MODEL"
+[[ "${SKIP_REVIEW:-0}" == 1 ]] || run_agent reviewer docs/collab/roles/reviewer.md "$REVIEW_MODEL"
 log "DONE. open tasks: $(open_tasks). commits: $(git rev-list --count master..HEAD)"
