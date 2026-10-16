@@ -1240,3 +1240,26 @@ export function cloneYDoc(doc: Y.Doc): Y.Doc {
   Y.applyUpdate(clone, Y.encodeStateAsUpdate(doc));
   return clone;
 }
+
+/**
+ * Resets `doc` in-place to match an authoritative full-state update from the server,
+ * discarding any unaccepted local transactions while preserving the `doc` object reference.
+ */
+export function resetYDocToServerState(
+  doc: Y.Doc,
+  serverStateUpdate: Uint8Array | string,
+): void {
+  const bytes =
+    typeof serverStateUpdate === 'string'
+      ? new Uint8Array(Buffer.from(serverStateUpdate, 'base64'))
+      : serverStateUpdate;
+  const empty = new Y.Doc();
+  doc.store = empty.store;
+  doc.share = empty.share;
+  // Advance clientID so subsequent edits on this doc never reuse old rejected clocks
+  doc.clientID = empty.clientID;
+  if (bytes.byteLength > 0) {
+    Y.applyUpdate(doc, bytes);
+  }
+}
+
