@@ -1,10 +1,13 @@
-import { objectTypes } from '../types/schema.js';
 import type { Workspace } from '../types/workspace.js';
 import {
   ROOM_ACTIONS,
   ROOM_ROLES,
   SERVER_ACTIONS,
   SERVER_ROLES,
+  type CollabOp,
+  type LockHolder,
+  type LockInfo,
+  type OpRejectCode,
   type RegistrationMode,
   type RoomAction,
   type RoomCreationMode,
@@ -255,120 +258,293 @@ export function canRoomAction(
   }
 }
 
-export type YDocDiffValidationResult =
+export type OpAuthorizationResult =
   | { ok: true }
   | {
       ok: false;
-      code: 'FORBIDDEN' | 'CONFLICT';
+      code: OpRejectCode;
       targetId?: string;
       message: string;
     };
 
-export function validateYDocDiffPermissions(
-  actorRoomRole: RoomRole,
-  prevWorkspace: Workspace,
-  nextWorkspace: Workspace,
-): YDocDiffValidationResult {
-  if (actorRoomRole === 'VIEWER') {
+export function authorizeOp(
+  role: RoomRole,
+  op: CollabOp,
+  lockState: Record<string, LockHolder | LockInfo | undefined>,
+  workspace: Workspace,
+  actor?: string | { userId?: string },
+): OpAuthorizationResult {
+  // 1. Viewers are always read-only
+  if (role === 'VIEWER') {
     return {
       ok: false,
-      code: 'FORBIDDEN',
-      message: 'Viewers have read-only access and cannot modify the workspace.',
+      code: 'READ_ONLY',
+      message: 'Viewers have read-only access and cannot submit operations.',
     };
   }
 
-  if (prevWorkspace.config.projectId !== nextWorkspace.config.projectId) {
-    return {
-      ok: false,
-      code: 'FORBIDDEN',
-      message: 'Project ID is immutable.',
-    };
-  }
+  const userId = typeof actor === 'string' ? actor : actor?.userId;
 
-  const nextRetiredSet = new Set(nextWorkspace.retiredIds);
-  for (const retiredId of prevWorkspace.retiredIds) {
-    if (!nextRetiredSet.has(retiredId)) {
-      return {
-        ok: false,
-        code: 'FORBIDDEN',
-        message: `Retired ID '${retiredId}' cannot be removed.`,
-      };
+  function getHolder(key: string): LockHolder | null {
+    const entry = lockState[key];
+    if (!entry) return null;
+    if ('expiresAt' in entry && typeof entry.expiresAt === 'number' && entry.expiresAt <= Date.now()) {
+      return null;
     }
+    if ('holder' in entry) return entry.holder;
+    return entry as LockHolder;
   }
 
-  if (JSON.stringify(prevWorkspace.config) !== JSON.stringify(nextWorkspace.config)) {
-    if (!canRoomAction(actorRoomRole, 'project:edit-settings')) {
-      return {
-        ok: false,
-        code: 'FORBIDDEN',
-        message: 'Only room admins and owners can modify project settings.',
-      };
-    }
+  function isHeldByOther(key: string): boolean {
+    const holder = getHolder(key);
+    if (!holder) return false;
+    return holder.userId !== userId;
   }
 
-  for (const type of objectTypes) {
-    const prevDomain = prevWorkspace.domains[type];
-    const nextDomain = nextWorkspace.domains[type];
+  function isHeldByCaller(key: string): boolean {
+    if (!userId) return false;
+    const holder = getHolder(key);
+    if (!holder) return false;
+    return holder.userId === userId;
+  }
 
-    const nextModuleMap = new Map(nextDomain.modules.map(m => [m.id, m]));
-    const nextFunctionMap = new Map(nextDomain.functions.map(f => [f.functionId, f]));
+  switch (op.kind) {
+    case 'hierarchy': {
+      const cmd = op.payload;
+      switch (cmd.action) {
+        case 'addModule':
+        case 'addFunction':
+          return { ok: true };
 
-    for (const prevMod of prevDomain.modules) {
-      if (!nextModuleMap.has(prevMod.id)) {
-        if (!canRoomAction(actorRoomRole, 'hierarchy:delete-module')) {
-          return {
-            ok: false,
-            code: 'FORBIDDEN',
-            targetId: prevMod.id,
-            message: `Only room admins and owners can delete module '${prevMod.id}'.`,
-          };
+        case 'editModule':
+        case 'editFunction': {
+          const key = `node:${cmd.id}`;
+          if (isHeldByOther(key)) {
+            const holder = getHolder(key)!;
+            return {
+              ok: false,
+              code: 'LOCKED',
+              targetId: cmd.id,
+              message: `Node '${cmd.id}' is locked by ${holder.name}.`,
+            };
+          }
+          return { ok: true };
+        }
+
+        case 'deleteModule': {
+          if (!hasMinimumRoomRole(role, 'ROOM_ADMIN')) {
+            return {
+              ok: false,
+              code: 'FORBIDDEN',
+              targetId: cmd.id,
+              message: `Only room admins and owners can delete module '${cmd.id}'.`,
+            };
+          }
+          const key = `node:${cmd.id}`;
+          if (isHeldByOther(key)) {
+            const holder = getHolder(key)!;
+            return {
+              ok: false,
+              code: 'LOCKED',
+              targetId: cmd.id,
+              message: `Node '${cmd.id}' is locked by ${holder.name}.`,
+            };
+          }
+
+          // Subtree lock check: deleting requires no lock held by others anywhere in the subtree
+          const domain = workspace.domains[cmd.objectType];
+          if (domain) {
+            const allModuleIds = new Set<string>([cmd.id]);
+            let expanded = true;
+            while (expanded) {
+              expanded = false;
+              for (const m of domain.modules) {
+                if (m.parentId && allModuleIds.has(m.parentId) && !allModuleIds.has(m.id)) {
+                  allModuleIds.add(m.id);
+                  expanded = true;
+                }
+              }
+            }
+
+            for (const modId of allModuleIds) {
+              if (modId !== cmd.id && isHeldByOther(`node:${modId}`)) {
+                return {
+                  ok: false,
+                  code: 'LOCKED',
+                  targetId: modId,
+                  message: `Cannot delete module '${cmd.id}' while locks are held in its subtree.`,
+                };
+              }
+            }
+
+            for (const fn of domain.functions) {
+              if (allModuleIds.has(fn.parentModuleId)) {
+                if (isHeldByOther(`node:${fn.functionId}`)) {
+                  return {
+                    ok: false,
+                    code: 'LOCKED',
+                    targetId: fn.functionId,
+                    message: `Cannot delete module '${cmd.id}' while locks are held in its subtree.`,
+                  };
+                }
+                if (isHeldByOther(`fn-desc:${fn.functionId}`)) {
+                  return {
+                    ok: false,
+                    code: 'LOCKED',
+                    targetId: fn.functionId,
+                    message: `Cannot delete module '${cmd.id}' while locks are held in its subtree.`,
+                  };
+                }
+                for (const itm of fn.items) {
+                  if (isHeldByOther(`item:${itm.id}`)) {
+                    return {
+                      ok: false,
+                      code: 'LOCKED',
+                      targetId: itm.id,
+                      message: `Cannot delete module '${cmd.id}' while locks are held in its subtree.`,
+                    };
+                  }
+                }
+              }
+            }
+          }
+          return { ok: true };
+        }
+
+        case 'deleteFunction': {
+          if (!hasMinimumRoomRole(role, 'ROOM_ADMIN')) {
+            return {
+              ok: false,
+              code: 'FORBIDDEN',
+              targetId: cmd.id,
+              message: `Only room admins and owners can delete function '${cmd.id}'.`,
+            };
+          }
+          const key = `node:${cmd.id}`;
+          if (isHeldByOther(key)) {
+            const holder = getHolder(key)!;
+            return {
+              ok: false,
+              code: 'LOCKED',
+              targetId: cmd.id,
+              message: `Node '${cmd.id}' is locked by ${holder.name}.`,
+            };
+          }
+
+          if (isHeldByOther(`fn-desc:${cmd.id}`)) {
+            return {
+              ok: false,
+              code: 'LOCKED',
+              targetId: cmd.id,
+              message: `Cannot delete function '${cmd.id}' while locks are held in its subtree.`,
+            };
+          }
+
+          const domain = workspace.domains[cmd.objectType];
+          const fn = domain?.functions.find(f => f.functionId === cmd.id);
+          if (fn) {
+            for (const itm of fn.items) {
+              if (isHeldByOther(`item:${itm.id}`)) {
+                return {
+                  ok: false,
+                  code: 'LOCKED',
+                  targetId: itm.id,
+                  message: `Cannot delete function '${cmd.id}' while locks are held in its subtree.`,
+                };
+              }
+            }
+          }
+          return { ok: true };
         }
       }
+      return { ok: true };
     }
 
-    for (const prevFn of prevDomain.functions) {
-      const nextFn = nextFunctionMap.get(prevFn.functionId);
-      if (!nextFn) {
-        if (!canRoomAction(actorRoomRole, 'hierarchy:delete-function')) {
-          return {
-            ok: false,
-            code: 'FORBIDDEN',
-            targetId: prevFn.functionId,
-            message: `Only room admins and owners can delete function '${prevFn.functionId}'.`,
-          };
-        }
-      } else if (nextFn.watermarkCounter < prevFn.watermarkCounter) {
+    case 'item.add': {
+      // Queue serializes adds; no lock required. Allowed for Editor, Admin, Owner.
+      return { ok: true };
+    }
+
+    case 'item.edit': {
+      // Caller must hold item:<itemId>
+      const key = `item:${op.payload.itemId}`;
+      if (!isHeldByCaller(key)) {
+        return {
+          ok: false,
+          code: 'LOCKED',
+          targetId: op.payload.itemId,
+          message: `Operation requires lock '${key}'.`,
+        };
+      }
+      return { ok: true };
+    }
+
+    case 'item.delete': {
+      // Lock must be free or held by caller
+      const key = `item:${op.payload.itemId}`;
+      if (isHeldByOther(key)) {
+        const holder = getHolder(key)!;
+        return {
+          ok: false,
+          code: 'LOCKED',
+          targetId: op.payload.itemId,
+          message: `Item '${op.payload.itemId}' is locked by ${holder.name}.`,
+        };
+      }
+      return { ok: true };
+    }
+
+    case 'function.description': {
+      // Caller must hold fn-desc:<functionId>
+      const key = `fn-desc:${op.payload.functionId}`;
+      if (!isHeldByCaller(key)) {
+        return {
+          ok: false,
+          code: 'LOCKED',
+          targetId: op.payload.functionId,
+          message: `Operation requires lock '${key}'.`,
+        };
+      }
+      return { ok: true };
+    }
+
+    case 'config.update': {
+      // Caller must hold config; admin only
+      if (!hasMinimumRoomRole(role, 'ROOM_ADMIN')) {
         return {
           ok: false,
           code: 'FORBIDDEN',
-          targetId: prevFn.functionId,
-          message: `Watermark counter for function '${prevFn.functionId}' cannot decrease (${prevFn.watermarkCounter} -> ${nextFn.watermarkCounter}).`,
+          message: 'Only room admins and owners can modify project settings.',
         };
       }
-    }
-
-    for (const nextMod of nextDomain.modules) {
-      if (nextMod.parentId !== null && !nextModuleMap.has(nextMod.parentId)) {
+      if (op.payload.projectId !== workspace.config.projectId) {
         return {
           ok: false,
-          code: 'CONFLICT',
-          targetId: nextMod.parentId,
-          message: 'The module or function you were editing was deleted by an administrator.',
+          code: 'FORBIDDEN',
+          message: 'Project ID is immutable.',
         };
       }
-    }
-
-    for (const nextFn of nextDomain.functions) {
-      if (!nextModuleMap.has(nextFn.parentModuleId)) {
+      const key = 'config';
+      if (!isHeldByCaller(key)) {
         return {
           ok: false,
-          code: 'CONFLICT',
-          targetId: nextFn.parentModuleId,
-          message: 'The module or function you were editing was deleted by an administrator.',
+          code: 'LOCKED',
+          message: `Operation requires lock '${key}'.`,
         };
       }
+      return { ok: true };
+    }
+
+    case 'room.restore': {
+      // Admin only; force-releases all locks with a notice
+      if (!hasMinimumRoomRole(role, 'ROOM_ADMIN')) {
+        return {
+          ok: false,
+          code: 'FORBIDDEN',
+          message: 'Only room admins and owners can restore revisions.',
+        };
+      }
+      return { ok: true };
     }
   }
-
-  return { ok: true };
 }

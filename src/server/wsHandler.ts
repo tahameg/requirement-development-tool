@@ -228,25 +228,35 @@ export class CollabWsHandler {
 
     const msg = validated.data;
     switch (msg.type) {
-      case 'sync-step1':
-        runtime.handleSyncStep1(connectionId, msg.stateVector);
+      case 'op':
+        await runtime.handleOp(connectionId, msg.op);
         break;
 
-      case 'sync-update':
-        await runtime.applyClientUpdate(connectionId, msg.update, msg.clientOpId);
+      case 'ops-since':
+        await runtime.handleOpsSince(connectionId, msg.seq);
         break;
 
-      case 'awareness-update':
-        runtime.handleAwarenessUpdate(connectionId, msg.state);
+      case 'lock-acquire':
+        runtime.handleLockAcquire(connectionId, msg.key);
         break;
 
-      case 'alloc-item':
-        await runtime.allocateItem(connectionId, {
-          requestId: msg.requestId,
-          tempId: msg.tempId,
-          objectType: msg.objectType,
-          functionId: msg.functionId,
-          values: msg.values,
+      case 'lock-release':
+        runtime.handleLockRelease(connectionId, msg.key);
+        break;
+
+      case 'lock-heartbeat':
+        runtime.handleLockHeartbeat(connectionId, msg.key);
+        break;
+
+      case 'lock-force-release':
+        runtime.handleLockForceRelease(connectionId, msg.key);
+        break;
+
+      case 'presence-update':
+        runtime.handlePresenceUpdate(connectionId, {
+          view: msg.view,
+          focus: msg.focus,
+          drafting: msg.drafting,
         });
         break;
 

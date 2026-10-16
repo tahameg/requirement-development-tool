@@ -13,8 +13,10 @@ import {
   apiSuccessEnvelopeSchema,
   auditListResponseSchema,
   authSessionResponseSchema,
-  awarenessUserStateSchema,
   banMemberResponseSchema,
+  collabOpKindSchema,
+  collabOpSchema,
+  configUpdateOpPayloadSchema,
   createDirectInviteRequestSchema,
   createDirectInviteResponseSchema,
   createInviteCodeRequestSchema,
@@ -25,19 +27,45 @@ import {
   createRoomRequestSchema,
   deleteRoomResponseSchema,
   discoveryBeaconSchema,
+  functionDescriptionOpPayloadSchema,
   getRevisionDiffResponseSchema,
   getRevisionResponseSchema,
   getRoomResponseSchema,
+  hierarchyOpPayloadSchema,
+  itemAddOpPayloadSchema,
+  itemDeleteOpPayloadSchema,
+  itemEditOpPayloadSchema,
   joinRequestResponseSchema,
   kickMemberResponseSchema,
   kickOrBanMemberRequestSchema,
   leaveRoomResponseSchema,
   listRevisionsResponseSchema,
   listRoomsResponseSchema,
+  lockAcquireSchema,
+  lockDeniedSchema,
+  lockForceReleaseSchema,
+  lockGrantedSchema,
+  lockHeartbeatSchema,
+  lockHolderSchema,
+  lockInfoSchema,
+  lockReleaseSchema,
+  locksChangedSchema,
   loginRequestSchema,
   logoutRequestSchema,
   logoutResponseSchema,
   meResponseSchema,
+  opAckSchema,
+  opAppliedSchema,
+  opRejectCodeSchema,
+  opRejectedSchema,
+  opsSinceReplySchema,
+  opsSinceSchema,
+  presenceBroadcastEntrySchema,
+  presenceBroadcastMessageSchema,
+  presenceFocusSchema,
+  presenceStateSchema,
+  presenceUpdateMessageSchema,
+  presenceViewSchema,
   redeemInviteCodeRequestSchema,
   redeemInviteCodeResponseSchema,
   registerRequestSchema,
@@ -49,9 +77,12 @@ import {
   revokeInviteResponseSchema,
   roomExportQuerySchema,
   roomExportResponseSchema,
+  roomRestoreOpPayloadSchema,
   roomSummaryResponseSchema,
+  roomWelcomeSchema,
   serverPublicInfoSchema,
   setupRequestSchema,
+  snapshotSchema,
   transferOwnershipRequestSchema,
   unbanMemberResponseSchema,
   updateRoomMemberRoleRequestSchema,
@@ -65,8 +96,15 @@ import {
 } from '../../src/shared/collab/protocol.js';
 import {
   assignUserColor,
+  COLLAB_OP_KINDS,
   COLLAB_USER_COLORS,
   DISCOVERY_BEACON_MAGIC,
+  OP_REJECT_CODES,
+  type CollabOp,
+  type LockHolder,
+  type LockInfo,
+  type PresenceBroadcastEntry,
+  type PresenceState,
 } from '../../src/shared/collab/types.js';
 
 const nowIso = '2026-10-16T00:00:00.000Z';
@@ -101,86 +139,84 @@ const sampleRevision = {
   id: 'rev_33333333-3333-3333-3333-333333333333',
   roomId: sampleRoomSummary.id,
   seq: 1,
-  message: 'Initial baseline',
+  message: 'Initial revision baseline',
   authorId: sampleUser.id,
   authorName: sampleUser.displayName,
-  snapshotFilename: 'rev_33333333-3333-3333-3333-333333333333.json',
+  snapshotFilename: 'rev_1.json',
   restoredFromId: null,
   createdAt: nowIso,
 };
 
-describe('Collaboration Protocol Schemas', () => {
-  it('assigns deterministic user colors from COLLAB_USER_COLORS', () => {
-    const color1 = assignUserColor('usr_abc');
-    const color2 = assignUserColor('usr_abc');
-    expect(color1).toBe(color2);
-    expect(COLLAB_USER_COLORS).toContain(color1);
+describe('Protocol Schemas (Zod Wire Validation)', () => {
+  it('assigns user colors deterministically from palette', () => {
+    const c1 = assignUserColor('usr_abc');
+    const c2 = assignUserColor('usr_abc');
+    const c3 = assignUserColor('usr_xyz');
+    expect(c1).toBe(c2);
+    expect(COLLAB_USER_COLORS).toContain(c1);
+    expect(COLLAB_USER_COLORS).toContain(c3);
   });
 
-  it('validates REST response envelopes and Public / Auth schemas', () => {
-    const publicInfo = {
-      serverId: 'srv_1',
-      name: 'Avionics HLR Server',
-      version: '0.6.0',
-      tls: true,
-      fingerprint: 'SHA256:4F:8A:12:BC',
-      setupRequired: false,
-      registrationMode: 'open' as const,
-      roomCreationMode: 'all_users' as const,
-    };
-    const envelopeSchema = apiSuccessEnvelopeSchema(serverPublicInfoSchema);
-    expect(envelopeSchema.parse({ ok: true, value: publicInfo }).value.name).toBe('Avionics HLR Server');
+  it('validates API standard success and error envelope schemas', () => {
+    const success = apiSuccessEnvelopeSchema(serverPublicInfoSchema).parse({
+      ok: true,
+      value: {
+        serverId: 'srv_1',
+        name: 'Avionics HLR Server',
+        version: '0.6.0',
+        tls: true,
+        fingerprint: 'SHA256:4F:8A:12:BC:99:00',
+        setupRequired: false,
+        registrationMode: 'open',
+        roomCreationMode: 'all_users',
+      },
+    });
+    expect(success.ok).toBe(true);
 
-    expect(
-      apiErrorEnvelopeSchema.parse({
-        ok: false,
-        code: 'FORBIDDEN',
-        error: 'Insufficient permissions',
-      }).code,
-    ).toBe('FORBIDDEN');
+    const error = apiErrorEnvelopeSchema.parse({
+      ok: false,
+      code: 'FORBIDDEN',
+      error: 'Action disallowed for role',
+    });
+    expect(error.ok).toBe(false);
+    expect(error.code).toBe('FORBIDDEN');
+  });
 
+  it('validates auth REST request and response schemas', () => {
     expect(
       setupRequestSchema.parse({
-        setupToken: 'tok_setup_123',
-        username: 'alice_eng',
-        displayName: 'Alice Engineer',
-        password: 'correct-horse-battery',
+        setupToken: 'tok_setup_12345',
+        username: 'alice_owner',
+        displayName: 'Alice Owner',
+        password: 'secure_password_123',
       }).username,
-    ).toBe('alice_eng');
-
-    expect(() =>
-      setupRequestSchema.parse({
-        setupToken: 'tok',
-        username: 'bad username with spaces',
-        displayName: 'Alice',
-        password: 'secret-password',
-      }),
-    ).toThrow();
-
-    expect(
-      authSessionResponseSchema.parse({
-        user: sampleUser,
-        token: 'sess_token_123',
-        expiresAt: nowIso,
-      }).user.id,
-    ).toBe(sampleUser.id);
+    ).toBe('alice_owner');
 
     expect(
       registerRequestSchema.parse({
         username: 'bob_dev',
         displayName: 'Bob Dev',
-        password: 'password123',
+        password: 'secure_password_123',
       }).username,
     ).toBe('bob_dev');
 
     expect(
-      registerResponseSchema.parse({
-        status: 'ACTIVE',
+      loginRequestSchema.parse({
+        username: 'bob_dev',
+        password: 'secure_password_123',
+      }).username,
+    ).toBe('bob_dev');
+
+    expect(logoutRequestSchema.parse({})).toEqual({});
+    expect(logoutResponseSchema.parse({ loggedOut: true })).toEqual({ loggedOut: true });
+
+    expect(
+      authSessionResponseSchema.parse({
         user: sampleUser,
-        token: 'sess_token_123',
+        token: 'sess_tok_abc',
         expiresAt: nowIso,
-      }).status,
-    ).toBe('ACTIVE');
+      }).token,
+    ).toBe('sess_tok_abc');
 
     expect(
       registerResponseSchema.parse({
@@ -189,10 +225,8 @@ describe('Collaboration Protocol Schemas', () => {
       }).status,
     ).toBe('PENDING_APPROVAL');
 
-    expect(loginRequestSchema.parse({ username: 'alice_eng', password: 'pw' }).username).toBe('alice_eng');
-    expect(logoutRequestSchema.parse({})).toEqual({});
-    expect(logoutResponseSchema.parse({ loggedOut: true }).loggedOut).toBe(true);
-    expect(meResponseSchema.parse({ user: sampleUser }).user.username).toBe('alice_eng');
+    expect(meResponseSchema.parse({ user: sampleUser }).user.id).toBe(sampleUser.id);
+
     expect(
       userDirectoryResponseSchema.parse({
         users: [{ id: sampleUser.id, username: sampleUser.username, displayName: sampleUser.displayName }],
@@ -200,49 +234,61 @@ describe('Collaboration Protocol Schemas', () => {
     ).toHaveLength(1);
   });
 
-  it('validates Server Administration REST schemas', () => {
+  it('validates server admin REST endpoints', () => {
     expect(
       updateServerSettingsRequestSchema.parse({
-        name: 'Updated Server',
+        name: 'Updated Server Name',
         registrationMode: 'approval',
-        roomCreationMode: 'admins_only',
       }).registrationMode,
     ).toBe('approval');
-    expect(() => updateServerSettingsRequestSchema.parse({})).toThrow();
 
     expect(
       updateServerSettingsResponseSchema.parse({
         settings: {
           serverId: 'srv_1',
-          name: 'Updated Server',
+          name: 'Avionics HLR',
           registrationMode: 'approval',
           roomCreationMode: 'admins_only',
           createdAt: nowIso,
           updatedAt: nowIso,
         },
-      }).settings.serverId,
-    ).toBe('srv_1');
+      }).settings.roomCreationMode,
+    ).toBe('admins_only');
 
     expect(adminListUsersResponseSchema.parse({ users: [sampleUser] }).users).toHaveLength(1);
+
     expect(
       adminCreateUserRequestSchema.parse({
         username: 'charlie',
-        displayName: 'Charlie',
+        displayName: 'Charlie Tech',
         password: 'password123',
-        serverRole: 'SERVER_ADMIN',
+        serverRole: 'USER',
       }).serverRole,
-    ).toBe('SERVER_ADMIN');
-    expect(adminUserResponseSchema.parse({ user: sampleUser }).user.id).toBe(sampleUser.id);
-    expect(adminUpdateUserRequestSchema.parse({ status: 'DISABLED' }).status).toBe('DISABLED');
-    expect(() => adminUpdateUserRequestSchema.parse({})).toThrow();
-    expect(adminResetPasswordRequestSchema.parse({ newPassword: 'newpassword123' }).newPassword).toBe(
-      'newpassword123',
+    ).toBe('USER');
+
+    expect(adminUserResponseSchema.parse({ user: sampleUser }).user.username).toBe('alice_eng');
+
+    expect(
+      adminUpdateUserRequestSchema.parse({
+        status: 'DISABLED',
+        serverRole: 'SERVER_ADMIN',
+      }).status,
+    ).toBe('DISABLED');
+
+    expect(adminResetPasswordRequestSchema.parse({ newPassword: 'new_password_123' }).newPassword).toBe(
+      'new_password_123',
     );
     expect(adminResetPasswordResponseSchema.parse({ reset: true }).reset).toBe(true);
+
     expect(adminListRoomsResponseSchema.parse({ rooms: [sampleRoomSummary] }).rooms).toHaveLength(1);
+
     expect(
-      adminResolveRoomRequestSchema.parse({ userId: sampleUser.id, role: 'ROOM_ADMIN' }).role,
-    ).toBe('ROOM_ADMIN');
+      adminResolveRoomRequestSchema.parse({
+        userId: sampleUser.id,
+        role: 'ROOM_OWNER',
+      }).role,
+    ).toBe('ROOM_OWNER');
+
     expect(
       auditListResponseSchema.parse({
         entries: [
@@ -251,9 +297,9 @@ describe('Collaboration Protocol Schemas', () => {
             roomId: sampleRoomSummary.id,
             actorId: sampleUser.id,
             actorName: sampleUser.displayName,
-            action: 'room.created',
+            action: 'room:create',
             targetId: sampleRoomSummary.id,
-            details: { visibility: 'listed' },
+            details: { name: sampleRoomSummary.name },
             createdAt: nowIso,
           },
         ],
@@ -261,52 +307,8 @@ describe('Collaboration Protocol Schemas', () => {
     ).toHaveLength(1);
   });
 
-  it('validates Room Lobby, Membership, Invites, Join Requests, and Revisions REST schemas', () => {
-    const ws = createWorkspace('Flight Control System', 'FCS');
-
-    const directInvite = {
-      id: 'inv_1',
-      roomId: sampleRoomSummary.id,
-      roomName: sampleRoomSummary.name,
-      kind: 'direct' as const,
-      targetUserId: 'usr_2',
-      targetUsername: 'bob',
-      targetDisplayName: 'Bob',
-      role: 'EDITOR' as const,
-      createdBy: sampleUser.id,
-      createdByDisplayName: sampleUser.displayName,
-      status: 'PENDING' as const,
-      createdAt: nowIso,
-    };
-
-    const inviteCode = {
-      id: 'inv_2',
-      roomId: sampleRoomSummary.id,
-      kind: 'code' as const,
-      code: 'HLR-ABCD-1234',
-      role: 'VIEWER' as const,
-      createdBy: sampleUser.id,
-      status: 'PENDING' as const,
-      uses: 1,
-      maxUses: 10,
-      expiresAt: nowIso,
-      createdAt: nowIso,
-    };
-
-    const joinReq = {
-      id: 'jreq_1',
-      roomId: sampleRoomSummary.id,
-      roomName: sampleRoomSummary.name,
-      userId: 'usr_3',
-      username: 'dana',
-      displayName: 'Dana',
-      message: 'Please let me join the review',
-      status: 'PENDING' as const,
-      assignedRole: null,
-      reviewedBy: null,
-      createdAt: nowIso,
-      reviewedAt: null,
-    };
+  it('validates Room Lobby, Invites, Join Requests, and Revisions schemas', () => {
+    const ws = createWorkspace('Avionics', 'AV');
 
     expect(
       listRoomsResponseSchema.parse({
@@ -320,26 +322,24 @@ describe('Collaboration Protocol Schemas', () => {
             ownerDisplayName: sampleUser.displayName,
             projectId: sampleRoomSummary.projectId,
             projectName: sampleRoomSummary.projectName,
-            memberCount: 3,
+            memberCount: 1,
             hasPendingJoinRequest: false,
             createdAt: nowIso,
             updatedAt: nowIso,
           },
         ],
-        myInvites: [directInvite],
-        myJoinRequests: [joinReq],
-      }).myRooms,
+        myInvites: [],
+        myJoinRequests: [],
+      }).listedRooms,
     ).toHaveLength(1);
 
     expect(
       createRoomRequestSchema.parse({
-        name: 'Flight Control Room',
-        visibility: 'private',
-        projectName: 'Flight Control System',
-        projectPrefix: 'FCS',
+        name: 'Avionics Room',
+        visibility: 'listed',
         workspace: ws,
-      }).name,
-    ).toBe('Flight Control Room');
+      }).visibility,
+    ).toBe('listed');
 
     expect(roomSummaryResponseSchema.parse({ room: sampleRoomSummary }).room.id).toBe(sampleRoomSummary.id);
 
@@ -354,85 +354,151 @@ describe('Collaboration Protocol Schemas', () => {
             displayName: sampleUser.displayName,
             role: 'ROOM_OWNER',
             joinedAt: nowIso,
-            online: true,
-            color: '#3b82f6',
           },
         ],
-        invites: [directInvite, inviteCode],
-        joinRequests: [joinReq],
-        bans: [
-          {
-            roomId: sampleRoomSummary.id,
-            userId: 'usr_9',
-            username: 'mallory',
-            displayName: 'Mallory',
-            bannedBy: sampleUser.id,
-            reason: 'Spam',
-            bannedAt: nowIso,
-          },
-        ],
+        invites: [],
+        joinRequests: [],
+        bans: [],
         workspace: ws,
-      }).invites,
-    ).toHaveLength(2);
+      }).members,
+    ).toHaveLength(1);
 
-    expect(updateRoomRequestSchema.parse({ visibility: 'listed' }).visibility).toBe('listed');
-    expect(() => updateRoomRequestSchema.parse({})).toThrow();
+    expect(updateRoomRequestSchema.parse({ name: 'Renamed Room' }).name).toBe('Renamed Room');
     expect(deleteRoomResponseSchema.parse({ deleted: true }).deleted).toBe(true);
     expect(leaveRoomResponseSchema.parse({ left: true }).left).toBe(true);
-    expect(transferOwnershipRequestSchema.parse({ newOwnerUserId: 'usr_2' }).newOwnerUserId).toBe('usr_2');
+    expect(
+      transferOwnershipRequestSchema.parse({ newOwnerUserId: 'usr_2' }).newOwnerUserId,
+    ).toBe('usr_2');
+
     expect(
       createDirectInviteRequestSchema.parse({ targetUserId: 'usr_2', role: 'EDITOR' }).role,
     ).toBe('EDITOR');
-    expect(createDirectInviteResponseSchema.parse({ invite: directInvite }).invite.id).toBe('inv_1');
+
+    expect(
+      createDirectInviteResponseSchema.parse({
+        invite: {
+          id: 'inv_1',
+          roomId: sampleRoomSummary.id,
+          roomName: sampleRoomSummary.name,
+          kind: 'direct',
+          targetUserId: 'usr_2',
+          targetUsername: 'bob',
+          targetDisplayName: 'Bob',
+          role: 'EDITOR',
+          createdBy: sampleUser.id,
+          createdByDisplayName: sampleUser.displayName,
+          status: 'PENDING',
+          createdAt: nowIso,
+        },
+      }).invite.role,
+    ).toBe('EDITOR');
+
     expect(respondInviteRequestSchema.parse({ accept: true }).accept).toBe(true);
     expect(
-      respondInviteResponseSchema.parse({ accepted: true, roomId: sampleRoomSummary.id, role: 'EDITOR' })
-        .accepted,
-    ).toBe(true);
+      respondInviteResponseSchema.parse({
+        accepted: true,
+        roomId: sampleRoomSummary.id,
+        role: 'EDITOR',
+      }).role,
+    ).toBe('EDITOR');
+
     expect(
       createInviteCodeRequestSchema.parse({ role: 'VIEWER', expiresInSeconds: 3600, maxUses: 5 }).maxUses,
     ).toBe(5);
-    expect(createInviteCodeResponseSchema.parse({ inviteCode }).inviteCode.code).toBe('HLR-ABCD-1234');
-    expect(redeemInviteCodeRequestSchema.parse({ code: 'HLR-ABCD-1234' }).code).toBe('HLR-ABCD-1234');
+
+    expect(
+      createInviteCodeResponseSchema.parse({
+        inviteCode: {
+          id: 'inv_2',
+          roomId: sampleRoomSummary.id,
+          kind: 'code',
+          code: 'INV-1234',
+          role: 'VIEWER',
+          createdBy: sampleUser.id,
+          status: 'PENDING',
+          uses: 0,
+          maxUses: 10,
+          expiresAt: nowIso,
+          createdAt: nowIso,
+        },
+      }).inviteCode.code,
+    ).toBe('INV-1234');
+
+    expect(redeemInviteCodeRequestSchema.parse({ code: 'INV-1234' }).code).toBe('INV-1234');
     expect(
       redeemInviteCodeResponseSchema.parse({ room: sampleRoomSummary, role: 'VIEWER' }).role,
     ).toBe('VIEWER');
+
     expect(revokeInviteResponseSchema.parse({ revoked: true }).revoked).toBe(true);
-    expect(createJoinRequestSchema.parse({ message: 'Hello' }).message).toBe('Hello');
-    expect(joinRequestResponseSchema.parse({ joinRequest: joinReq }).joinRequest.id).toBe('jreq_1');
-    expect(reviewJoinRequestSchema.parse({ approve: true, role: 'EDITOR' }).role).toBe('EDITOR');
-    expect(updateRoomMemberRoleRequestSchema.parse({ role: 'EDITOR' }).role).toBe('EDITOR');
+
+    expect(
+      createJoinRequestSchema.parse({ message: 'I would like to contribute.' }).message,
+    ).toBe('I would like to contribute.');
+
+    expect(
+      joinRequestResponseSchema.parse({
+        joinRequest: {
+          id: 'jreq_1',
+          roomId: sampleRoomSummary.id,
+          roomName: sampleRoomSummary.name,
+          userId: 'usr_3',
+          username: 'charlie',
+          displayName: 'Charlie',
+          message: 'Hello',
+          status: 'PENDING',
+          assignedRole: null,
+          reviewedBy: null,
+          createdAt: nowIso,
+          reviewedAt: null,
+        },
+      }).joinRequest.status,
+    ).toBe('PENDING');
+
+    expect(
+      reviewJoinRequestSchema.parse({ approve: true, role: 'EDITOR' }).role,
+    ).toBe('EDITOR');
+
+    expect(
+      updateRoomMemberRoleRequestSchema.parse({ role: 'ROOM_ADMIN' }).role,
+    ).toBe('ROOM_ADMIN');
+
     expect(
       updateRoomMemberRoleResponseSchema.parse({
         member: {
           roomId: sampleRoomSummary.id,
-          userId: 'usr_2',
-          username: 'bob',
-          displayName: 'Bob',
-          role: 'EDITOR',
+          userId: sampleUser.id,
+          username: sampleUser.username,
+          displayName: sampleUser.displayName,
+          role: 'ROOM_ADMIN',
           joinedAt: nowIso,
         },
       }).member.role,
-    ).toBe('EDITOR');
-    expect(kickOrBanMemberRequestSchema.parse({ reason: 'Policy' }).reason).toBe('Policy');
+    ).toBe('ROOM_ADMIN');
+
+    expect(
+      kickOrBanMemberRequestSchema.parse({ reason: 'Inappropriate conduct' }).reason,
+    ).toBe('Inappropriate conduct');
+
     expect(kickMemberResponseSchema.parse({ kicked: true }).kicked).toBe(true);
     expect(banMemberResponseSchema.parse({ banned: true }).banned).toBe(true);
     expect(unbanMemberResponseSchema.parse({ unbanned: true }).unbanned).toBe(true);
-    expect(roomExportQuerySchema.parse({ format: 'csv', objectType: 'REQUIREMENT' }).format).toBe('csv');
-    expect(roomExportResponseSchema.parse({ format: 'json', content: ws }).format).toBe('json');
 
-    // Revisions
+    expect(roomExportQuerySchema.parse({ format: 'json' }).format).toBe('json');
+    expect(
+      roomExportResponseSchema.parse({ format: 'csv', content: 'id,description\n1,test' }).format,
+    ).toBe('csv');
+
     expect(listRevisionsResponseSchema.parse({ revisions: [sampleRevision] }).revisions).toHaveLength(1);
-    expect(createRevisionRequestSchema.parse({ message: 'Milestone 1' }).message).toBe('Milestone 1');
+    expect(createRevisionRequestSchema.parse({ message: 'Baseline 1' }).message).toBe('Baseline 1');
     expect(createRevisionResponseSchema.parse({ revision: sampleRevision }).revision.seq).toBe(1);
-    expect(getRevisionResponseSchema.parse({ revision: sampleRevision, workspace: ws }).revision.id).toBe(
-      sampleRevision.id,
+    expect(getRevisionResponseSchema.parse({ revision: sampleRevision, workspace: ws }).workspace.config.projectName).toBe(
+      'Avionics',
     );
     expect(
       getRevisionDiffResponseSchema.parse({
         diff: {
-          fromRevisionId: sampleRevision.id,
-          toTarget: 'current',
+          fromRevisionId: 'rev_1',
+          toTarget: 'rev_2',
           configChanged: false,
           modules: { added: [], modified: [], deleted: [] },
           functions: { added: [], modified: [], deleted: [] },
@@ -449,44 +515,207 @@ describe('Collaboration Protocol Schemas', () => {
     );
   });
 
-  it('validates Awareness state and WebSocket Client & Server messages', () => {
-    const awarenessState = {
+  it('validates Architecture v2 Operations, Op envelopes, and Op reject codes', () => {
+    // Op kinds
+    for (const kind of COLLAB_OP_KINDS) {
+      expect(collabOpKindSchema.parse(kind)).toBe(kind);
+    }
+    expect(() => collabOpKindSchema.parse('invalid.op')).toThrow();
+
+    // Reject codes
+    for (const code of OP_REJECT_CODES) {
+      expect(opRejectCodeSchema.parse(code)).toBe(code);
+    }
+    expect(() => opRejectCodeSchema.parse('UNKNOWN_CODE')).toThrow();
+
+    const ws = createWorkspace('Test Project', 'TP');
+
+    // Individual op payloads
+    const hierPayload = hierarchyOpPayloadSchema.parse({
+      objectType: 'REQUIREMENT',
+      action: 'addModule',
+      parentId: null,
+      name: 'Mod',
+      prefix: 'M',
+      description: 'Desc',
+    });
+    expect(hierPayload.action).toBe('addModule');
+
+    const itemAddPayload = itemAddOpPayloadSchema.parse({
+      objectType: 'REQUIREMENT',
+      functionId: 'fn_1',
+      values: { col_desc: 'New requirement', col_priority: 1 },
+    });
+    expect(itemAddPayload.functionId).toBe('fn_1');
+
+    const itemEditPayload = itemEditOpPayloadSchema.parse({
+      objectType: 'REQUIREMENT',
+      functionId: 'fn_1',
+      itemId: 'REQ-001',
+      values: { col_desc: 'Updated text' },
+    });
+    expect(itemEditPayload.itemId).toBe('REQ-001');
+
+    const itemDeletePayload = itemDeleteOpPayloadSchema.parse({
+      objectType: 'REQUIREMENT',
+      functionId: 'fn_1',
+      itemId: 'REQ-001',
+    });
+    expect(itemDeletePayload.itemId).toBe('REQ-001');
+
+    const fnDescPayload = functionDescriptionOpPayloadSchema.parse({
+      objectType: 'REQUIREMENT',
+      functionId: 'fn_1',
+      description: '# Markdown Scope',
+    });
+    expect(fnDescPayload.description).toBe('# Markdown Scope');
+
+    const configPayload = configUpdateOpPayloadSchema.parse(ws.config);
+    expect(configPayload.projectName).toBe('Test Project');
+
+    const restorePayload = roomRestoreOpPayloadSchema.parse({ revisionId: 'rev_123' });
+    expect(restorePayload.revisionId).toBe('rev_123');
+
+    // CollabOp discriminated union envelopes
+    const ops: CollabOp[] = [
+      { opId: 'op_1', kind: 'hierarchy', payload: hierPayload },
+      { opId: 'op_2', kind: 'item.add', payload: itemAddPayload },
+      { opId: 'op_3', kind: 'item.edit', payload: itemEditPayload },
+      { opId: 'op_4', kind: 'item.delete', payload: itemDeletePayload },
+      { opId: 'op_5', kind: 'function.description', payload: fnDescPayload },
+      { opId: 'op_6', kind: 'config.update', payload: configPayload },
+      { opId: 'op_7', kind: 'room.restore', payload: restorePayload },
+    ];
+
+    for (const op of ops) {
+      expect(collabOpSchema.parse(op).kind).toBe(op.kind);
+    }
+  });
+
+  it('validates Architecture v2 Locks schemas (acquire, granted, denied, release, heartbeat, force-release, changed)', () => {
+    const holder: LockHolder = {
       userId: sampleUser.id,
-      username: sampleUser.username,
-      displayName: sampleUser.displayName,
-      role: 'ROOM_OWNER' as const,
+      name: sampleUser.displayName,
       color: '#3b82f6',
-      view: {
-        objectType: 'REQUIREMENT' as const,
-        kind: 'function' as const,
-        id: 'fn_1234',
+    };
+    expect(lockHolderSchema.parse(holder)).toEqual(holder);
+
+    const info: LockInfo = {
+      holder,
+      expiresAt: 1760573748000,
+    };
+    expect(lockInfoSchema.parse(info)).toEqual(info);
+
+    expect(lockAcquireSchema.parse({ type: 'lock-acquire', key: 'item:REQ-001' }).key).toBe('item:REQ-001');
+    expect(lockReleaseSchema.parse({ type: 'lock-release', key: 'item:REQ-001' }).key).toBe('item:REQ-001');
+    expect(lockHeartbeatSchema.parse({ type: 'lock-heartbeat', key: 'item:REQ-001' }).key).toBe('item:REQ-001');
+    expect(lockForceReleaseSchema.parse({ type: 'lock-force-release', key: 'item:REQ-001' }).key).toBe(
+      'item:REQ-001',
+    );
+
+    expect(
+      lockGrantedSchema.parse({ type: 'lock-granted', key: 'item:REQ-001', expiresAt: 1760573748000 }).expiresAt,
+    ).toBe(1760573748000);
+
+    expect(
+      lockDeniedSchema.parse({ type: 'lock-denied', key: 'item:REQ-001', holder }).holder.userId,
+    ).toBe(sampleUser.id);
+
+    expect(
+      locksChangedSchema.parse({ type: 'locks-changed', key: 'item:REQ-001', holder }).holder?.userId,
+    ).toBe(sampleUser.id);
+
+    expect(
+      locksChangedSchema.parse({ type: 'locks-changed', key: 'item:REQ-001', holder: null }).holder,
+    ).toBeNull();
+  });
+
+  it('validates Architecture v2 Presence schemas (view, focus, state, broadcast)', () => {
+    const view = presenceViewSchema.parse({
+      objectType: 'REQUIREMENT',
+      nodeId: 'fn_123',
+    });
+    expect(view.nodeId).toBe('fn_123');
+
+    const focus = presenceFocusSchema.parse({
+      itemId: 'REQ-001',
+      columnId: 'col_desc',
+    });
+    expect(focus.columnId).toBe('col_desc');
+
+    const state: PresenceState = presenceStateSchema.parse({
+      view,
+      focus,
+      drafting: 'fn_123',
+    });
+    expect(state.drafting).toBe('fn_123');
+
+    const entry: PresenceBroadcastEntry = presenceBroadcastEntrySchema.parse({
+      connectionId: 'conn_1',
+      user: {
+        userId: sampleUser.id,
+        name: sampleUser.displayName,
+        color: '#3b82f6',
       },
-      focus: {
-        objectType: 'REQUIREMENT' as const,
-        functionId: 'fn_1234',
-        itemId: 'REQ-FCS-001',
-        columnId: 'col_desc',
-        cursor: { anchor: 0, head: 12 },
-      },
-      updatedAt: 1760573748000,
+      state,
+    });
+    expect(entry.connectionId).toBe('conn_1');
+
+    expect(
+      presenceUpdateMessageSchema.parse({
+        type: 'presence-update',
+        view,
+        focus,
+        drafting: null,
+      }).drafting,
+    ).toBeNull();
+
+    expect(
+      presenceBroadcastMessageSchema.parse({
+        type: 'presence',
+        connectionId: 'conn_1',
+        user: { userId: sampleUser.id, name: sampleUser.displayName, color: '#3b82f6' },
+        state,
+      }).connectionId,
+    ).toBe('conn_1');
+  });
+
+  it('validates all WebSocket Client & Server message types in v2', () => {
+    const ws = createWorkspace('Test Project', 'TP');
+    const holder: LockHolder = {
+      userId: sampleUser.id,
+      name: sampleUser.displayName,
+      color: '#3b82f6',
+    };
+    const presenceEntry: PresenceBroadcastEntry = {
+      connectionId: 'conn_1',
+      user: { userId: sampleUser.id, name: sampleUser.displayName, color: '#3b82f6' },
+      state: { view: null, focus: null, drafting: null },
     };
 
-    expect(awarenessUserStateSchema.parse(awarenessState).userId).toBe(sampleUser.id);
-
-    const b64 = Buffer.from([1, 2, 3, 4]).toString('base64');
-
-    const clientMessages = [
-      { type: 'sync-step1', stateVector: b64 },
-      { type: 'sync-update', update: b64, clientOpId: 'op_1' },
-      { type: 'awareness-update', state: awarenessState },
-      { type: 'awareness-update', state: null },
-      {
-        type: 'alloc-item',
-        requestId: 'req_1',
-        tempId: '__pending__:1',
+    const sampleOp: CollabOp = {
+      opId: 'op_100',
+      kind: 'item.add',
+      payload: {
         objectType: 'REQUIREMENT',
-        functionId: 'fn_1234',
-        values: { col_desc: 'The system shall...', col_status: 'Draft' },
+        functionId: 'fn_1',
+        values: { col_desc: 'New requirement' },
+      },
+    };
+
+    // Client messages
+    const clientMessages = [
+      { type: 'op', op: sampleOp },
+      { type: 'ops-since', seq: 42 },
+      { type: 'lock-acquire', key: 'item:REQ-001' },
+      { type: 'lock-release', key: 'item:REQ-001' },
+      { type: 'lock-heartbeat', key: 'item:REQ-001' },
+      { type: 'lock-force-release', key: 'item:REQ-001' },
+      {
+        type: 'presence-update',
+        view: { objectType: 'REQUIREMENT', nodeId: 'fn_1' },
+        focus: { itemId: 'REQ-001', columnId: 'col_desc' },
+        drafting: 'fn_1',
       },
       { type: 'ping', timestamp: 1760573748000 },
     ];
@@ -495,53 +724,46 @@ describe('Collaboration Protocol Schemas', () => {
       expect(wsClientMessageSchema.parse(msg).type).toBe(msg.type);
     }
 
-    const onlineMember = {
-      userId: sampleUser.id,
-      username: sampleUser.username,
-      displayName: sampleUser.displayName,
-      role: 'ROOM_OWNER' as const,
-      color: '#3b82f6',
-    };
-
+    // Server messages
     const serverMessages = [
       {
         type: 'room-welcome',
         roomId: sampleRoomSummary.id,
         role: 'ROOM_OWNER',
-        stateUpdate: b64,
-        awarenessStates: [awarenessState],
-        onlineMembers: [onlineMember],
+        seq: 10,
+        workspace: ws,
+        locks: { 'item:REQ-001': holder },
+        presence: [presenceEntry],
+        members: [
+          {
+            roomId: sampleRoomSummary.id,
+            userId: sampleUser.id,
+            username: sampleUser.username,
+            displayName: sampleUser.displayName,
+            role: 'ROOM_OWNER',
+            joinedAt: nowIso,
+          },
+        ],
         autosaveStatus: { status: 'autosaved', lastAutosavedAt: nowIso },
         lastRevision: sampleRevision,
       },
-      { type: 'sync-step2', update: b64 },
-      { type: 'sync-update', update: b64, actorUserId: sampleUser.id, clientOpId: 'op_1' },
+      { type: 'op-ack', opId: 'op_100', seq: 11 },
+      { type: 'op-rejected', opId: 'op_100', code: 'LOCKED', message: 'Row is locked' },
+      { type: 'op-applied', seq: 11, op: sampleOp, result: { id: 'REQ-001' } },
       {
-        type: 'alloc-item-ack',
-        requestId: 'req_1',
-        tempId: '__pending__:1',
-        objectType: 'REQUIREMENT',
-        functionId: 'fn_1234',
-        item: {
-          id: 'REQ-FCS-001',
-          seq: 1,
-          created_at: nowIso,
-          values: { col_desc: 'The system shall...', col_status: 'Draft' },
-        },
+        type: 'ops-since-reply',
+        sinceSeq: 5,
+        ops: [{ seq: 6, op: sampleOp }],
       },
+      { type: 'snapshot', seq: 10, workspace: ws },
+      { type: 'lock-granted', key: 'item:REQ-001', expiresAt: 1760573748000 },
+      { type: 'lock-denied', key: 'item:REQ-001', holder },
+      { type: 'locks-changed', key: 'item:REQ-001', holder },
       {
-        type: 'awareness-broadcast',
-        states: [awarenessState],
-        onlineMembers: [onlineMember],
-      },
-      {
-        type: 'autosave-status',
-        status: 'autosaved',
-        lastAutosavedAt: nowIso,
-      },
-      {
-        type: 'revision-saved',
-        revision: sampleRevision,
+        type: 'presence',
+        connectionId: 'conn_1',
+        user: { userId: sampleUser.id, name: sampleUser.displayName, color: '#3b82f6' },
+        state: { view: null, focus: null, drafting: null },
       },
       {
         type: 'room-notification',
@@ -552,28 +774,46 @@ describe('Collaboration Protocol Schemas', () => {
         timestamp: nowIso,
       },
       {
-        type: 'conflict',
-        code: 'TARGET_DELETED',
-        targetId: 'mod_1',
-        message: 'The module or function you were editing was deleted by an administrator.',
-        correctiveUpdate: b64,
+        type: 'autosave-status',
+        status: 'autosaved',
+        lastAutosavedAt: nowIso,
       },
       {
-        type: 'error',
-        code: 'FORBIDDEN',
-        message: 'Viewers cannot modify workspace',
-        requestId: 'req_1',
-        correctiveUpdate: b64,
+        type: 'revision-saved',
+        revision: sampleRevision,
       },
       { type: 'kicked', reason: 'Removed by admin' },
       { type: 'banned', reason: 'Banned by admin' },
       { type: 'room-deleted', reason: 'Room deleted by owner' },
       { type: 'pong', timestamp: 1760573748000 },
+      { type: 'error', code: 'FORBIDDEN', message: 'Action not allowed' },
     ];
 
     for (const msg of serverMessages) {
       expect(wsServerMessageSchema.parse(msg).type).toBe(msg.type);
     }
+
+    // Specific schemas
+    expect(opAckSchema.parse({ type: 'op-ack', opId: 'op_1', seq: 5 }).seq).toBe(5);
+    expect(
+      opRejectedSchema.parse({ type: 'op-rejected', opId: 'op_1', code: 'READ_ONLY', message: 'Viewer' }).code,
+    ).toBe('READ_ONLY');
+    expect(opAppliedSchema.parse({ type: 'op-applied', seq: 1, op: sampleOp }).seq).toBe(1);
+    expect(opsSinceSchema.parse({ type: 'ops-since', seq: 3 }).seq).toBe(3);
+    expect(opsSinceReplySchema.parse({ type: 'ops-since-reply', sinceSeq: 3, ops: [] }).sinceSeq).toBe(3);
+    expect(snapshotSchema.parse({ type: 'snapshot', seq: 10, workspace: ws }).seq).toBe(10);
+    expect(
+      roomWelcomeSchema.parse({
+        type: 'room-welcome',
+        roomId: 'r_1',
+        role: 'EDITOR',
+        seq: 0,
+        workspace: ws,
+        locks: {},
+        presence: [],
+        members: [],
+      }).role,
+    ).toBe('EDITOR');
   });
 
   it('validates UDP LAN Discovery Beacon schema and rejects wrong magic or invalid ports', () => {

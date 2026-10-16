@@ -92,37 +92,46 @@ This document specifies the wire protocols, REST API endpoints, WebSocket messag
 ### 3.1 Connection & Authentication
 - Endpoint: `wss://<host>:<port>/ws/rooms/<roomId>?token=<sessionToken>` (or `Authorization: Bearer <sessionToken>` header).
 - If the token is invalid, the user is not a member of `<roomId>`, or the user is banned, the server closes the WebSocket with code `4401` (`Unauthorized`) or `4403` (`Forbidden`).
-- All WebSocket messages are UTF-8 JSON frames validated with Zod (`wsClientMessageSchema` and `wsServerMessageSchema`). Binary Yjs updates and Awareness payloads are base64-encoded strings inside JSON frames so every message is self-describing and schema-validated.
+- All WebSocket messages are UTF-8 JSON frames validated with Zod (`wsClientMessageSchema` and `wsServerMessageSchema`). Yjs is not used; synchronization is based on server-ordered operations, monotonic sequence numbers (`seq`), explicit lease locks, and presence broadcasts as specified in `ARCHITECTURE-v2.md`.
 
 ### 3.2 Client -> Server Messages (`WsClientMessage`)
 
 ```ts
 export type WsClientMessage =
-  // 1. Yjs Synchronization (y-protocols/sync state vector & incremental updates)
+  // 1. Authoritative Operation Submission
   | {
-      type: 'sync-step1';
-      stateVector: string; // base64(Y.encodeStateVector(clientDoc))
+      type: 'op';
+      clientOpId: string;
+      op: CollabOp;
+    }
+  // 2. Catch-up Request
+  | {
+      type: 'ops-since';
+      sinceSeq: number;
+    }
+  // 3. Lease Lock Management
+  | {
+      type: 'lock-acquire';
+      target: string; // e.g. "item:<id>" | "function:<id>:scope"
     }
   | {
-      type: 'sync-update';
-      update: string; // base64(Uint8Array Yjs update)
-      clientOpId?: string;
+      type: 'lock-release';
+      target: string;
     }
-  // 2. Presence & Field Focus Awareness
   | {
-      type: 'awareness-update';
-      state: AwarenessUserState | null; // null on clean disconnect
+      type: 'lock-heartbeat';
+      targets: string[];
     }
-  // 3. Server-Authoritative Item ID Allocation
   | {
-      type: 'alloc-item';
-      requestId: string;
-      tempId: string; // e.g. "__pending__:<uuid>"
-      objectType: ObjectType;
-      functionId: string;
-      values: Record<string, string | number | boolean | null>;
+      type: 'lock-force-release';
+      target: string;
     }
-  // 4. Keepalive Ping
+  // 4. Ephemeral Presence
+  | {
+      type: 'presence-update';
+      presence: PresenceState | null; // null on clear/blur
+    }
+  // 5. Keepalive Ping
   | {
       type: 'ping';
       timestamp: number;
@@ -138,39 +147,74 @@ export type WsServerMessage =
       type: 'room-welcome';
       roomId: string;
       role: RoomRole;
-      stateUpdate: string; // base64(Y.encodeStateAsUpdate(serverDoc))
-      awarenessStates: AwarenessUserState[];
-      onlineMembers: Array<{ userId: string; username: string; displayName: string; role: RoomRole; color: string }>;
+      workspace: Workspace;
+      seq: number;
+      locks: LockState;
+      presence: PresenceBroadcastEntry[];
+      members: OnlineMemberInfo[];
       autosaveStatus: { status: 'autosaved' | 'saving'; lastAutosavedAt: string | null };
       lastRevision: RevisionMetadata | null;
     }
-  // 2. Yjs Sync Step 2 & Live Broadcast Updates
+  // 2. Operation Acknowledgment, Rejection & Broadcast
   | {
-      type: 'sync-step2';
-      update: string; // base64(Y.encodeStateAsUpdate(serverDoc, clientStateVector))
+      type: 'op-ack';
+      clientOpId: string;
+      seq: number;
+      opId: string;
+      allocatedId?: string;
     }
   | {
-      type: 'sync-update';
-      update: string; // base64(Uint8Array Yjs update)
-      actorUserId: string;
-      clientOpId?: string;
+      type: 'op-rejected';
+      clientOpId: string;
+      code: OpRejectCode;
+      reason: string;
     }
-  // 3. Authoritative ID Allocation Acknowledgement
   | {
-      type: 'alloc-item-ack';
-      requestId: string;
-      tempId: string;
-      objectType: ObjectType;
-      functionId: string;
-      item: Item; // Contains permanent assigned `id` and `seq`
+      type: 'op-applied';
+      seq: number;
+      opId: string;
+      actorId: string;
+      op: CollabOp;
     }
-  // 4. Presence & Online Member Roster Broadcast
+  // 3. Catch-up & Snapshots
   | {
-      type: 'awareness-broadcast';
-      states: AwarenessUserState[];
-      onlineMembers: Array<{ userId: string; username: string; displayName: string; role: RoomRole; color: string }>;
+      type: 'ops-since-reply';
+      ops: Array<{ seq: number; opId: string; actorId: string; op: CollabOp }>;
+      latestSeq: number;
     }
-  // 5. Autosave & Revision Events
+  | {
+      type: 'snapshot';
+      workspace: Workspace;
+      seq: number;
+      locks: LockState;
+    }
+  // 4. Lock Events
+  | {
+      type: 'locks-changed';
+      locks: LockState;
+    }
+  | {
+      type: 'lock-granted';
+      target: string;
+      expiresAt: string;
+    }
+  | {
+      type: 'lock-denied';
+      target: string;
+      heldBy: LockHolder;
+    }
+  | {
+      type: 'lock-revoked';
+      target: string;
+      reason: 'expired' | 'force_released' | 'target_deleted';
+    }
+  // 5. Presence & Online Members
+  | {
+      type: 'presence-broadcast';
+      entries: PresenceBroadcastEntry[];
+      onlineMembers: OnlineMemberInfo[];
+    }
+  // 6. Autosave & Revision Events
   | {
       type: 'autosave-status';
       status: 'saving' | 'autosaved';
@@ -181,30 +225,38 @@ export type WsServerMessage =
       revision: RevisionMetadata;
       restoredFromId?: string;
     }
-  // 6. Room Membership, Role & Admin Events
+  // 7. Room Membership, Role & Admin Events
   | {
       type: 'room-notification';
-      kind: 'user-joined' | 'user-left' | 'role-changed' | 'join-request-created' | 'join-request-reviewed' | 'member-kicked' | 'member-banned' | 'ownership-transferred';
+      kind:
+        | 'user-joined'
+        | 'user-left'
+        | 'role-changed'
+        | 'join-request-created'
+        | 'join-request-reviewed'
+        | 'member-kicked'
+        | 'member-banned'
+        | 'ownership-transferred';
       message: string;
       targetUserId?: string;
       newRole?: RoomRole;
       joinRequest?: JoinRequestSummary;
       timestamp: string;
     }
-  // 7. Structural Conflict & Permission/Validation Rejection
+  // 8. Conflicts, Errors & Lifecycle
   | {
       type: 'conflict';
       code: 'TARGET_DELETED' | 'CONCURRENT_STRUCTURE_CHANGE';
       targetId: string;
       message: string;
-      correctiveUpdate: string; // base64(Y.encodeStateAsUpdate(serverDoc))
+      snapshot?: Workspace;
+      seq?: number;
     }
   | {
       type: 'error';
       code: 'FORBIDDEN' | 'PERMISSION_REVOKED' | 'VALIDATION_ERROR' | 'BAD_REQUEST';
       message: string;
       requestId?: string;
-      correctiveUpdate?: string; // base64(Y.encodeStateAsUpdate(serverDoc)) to revert unauthorized local Y.Doc changes
     }
   | {
       type: 'kicked' | 'banned' | 'room-deleted';
@@ -216,74 +268,45 @@ export type WsServerMessage =
     };
 ```
 
----
-
-## 4. Yjs Document Shape (`src/shared/collab/yjsDoc.ts`)
-
-Each room has one authoritative `Y.Doc`. Its top-level shared types map deterministically and losslessly to `Workspace`:
-
-```
-Y.Doc
-├── ydoc.getMap('config')                   [Y.Map<unknown>]
-│   ├── 'version'                           -> '1.0.0'
-│   ├── 'projectId'                         -> string (immutable)
-│   ├── 'projectName'                       -> string
-│   ├── 'projectPrefix'                     -> string
-│   ├── 'idCasing'                          -> 'UPPER' | 'LOWER' | 'AS_IS'
-│   └── 'objectTypes'                       -> Y.Map<Y.Map<unknown>> keyed by ObjectType:
-│       └── <ObjectType> ('REQUIREMENT' | 'DATA_DICTIONARY' | 'ENTITY' | 'ACTION')
-│           ├── 'name'                      -> string
-│           ├── 'prefix'                    -> string
-│           ├── 'enabled'                   -> boolean
-│           ├── 'usePrefix'                 -> boolean
-│           └── 'columns'                   -> Column[] (stored as plain array of Column objects)
-│
-├── ydoc.getArray('retiredIds')             [Y.Array<string>]
-│   └── Append-only tombstones of deleted item IDs (deduplicated on read)
-│
-└── ydoc.getMap('domains')                  [Y.Map<Y.Map<unknown>>] keyed by ObjectType
-    └── <ObjectType>                        [Y.Map<unknown>]
-        ├── 'moduleOrder'                   [Y.Array<string>] (ordered module IDs)
-        ├── 'modules'                       [Y.Map<Y.Map<unknown>>] keyed by module.id
-        │   └── <moduleId>                  [Y.Map<unknown>]
-        │       ├── 'id'                    -> string
-        │       ├── 'name'                  -> string
-        │       ├── 'prefix'                -> string
-        │       ├── 'description'           -> Y.Text (character-level collaborative editing)
-        │       └── 'parentId'              -> string | null
-        │
-        ├── 'functionOrder'                 [Y.Array<string>] (ordered functionIds)
-        └── 'functions'                     [Y.Map<Y.Map<unknown>>] keyed by fn.functionId
-            └── <functionId>                [Y.Map<unknown>]
-                ├── 'functionId'            -> string
-                ├── 'name'                  -> string
-                ├── 'prefix'                -> string
-                ├── 'parentModuleId'        -> string
-                ├── 'description'           -> Y.Text (character-level collaborative Markdown scope)
-                ├── 'watermarkCounter'      -> number (monotonic integer)
-                ├── 'itemOrder'             [Y.Array<string>] (ordered item IDs)
-                └── 'items'                 [Y.Map<Y.Map<unknown>>] keyed by item.id
-                    └── <itemId>            [Y.Map<unknown>]
-                        ├── 'id'            -> string
-                        ├── 'seq'           -> number
-                        ├── 'created_at'    -> string (ISO 8601)
-                        ├── 'updated_at'    -> string | undefined (ISO 8601)
-                        └── 'values'        [Y.Map<unknown>] keyed by column.id
-                            ├── <textColId> -> Y.Text (when column.type is 'string' | 'text' | 'markdown')
-                            └── <scalarId>  -> string | number | boolean | null (when column.type is 'enum' | 'number' | 'boolean' | 'date' | 'reference')
-```
-
-### Y.Text vs Scalar Field Rules
-- **Text / Markdown / String columns and descriptions** are stored as `Y.Text` instances. When a user edits text, `applyTextChange(ytext, nextString)` computes the minimal prefix/suffix diff and applies `ytext.delete(start, deleteLen)` and `ytext.insert(start, inserted)` inside a single `ydoc.transact()`.
-- **Scalar columns (`enum`, `number`, `boolean`, `date`, `reference`)** are stored as primitive values (`string | number | boolean | null`) directly inside the item's `values` `Y.Map` (last-writer-wins).
-- When converting `Y.Doc` back to `Workspace` via `yDocToWorkspace(doc)`:
-  - Any `Y.Text` entry in `values` is converted via `.toString()`.
-  - `fn.modulePath` is computed from `domain.modules` and `fn.parentModuleId` via `moduleChain`.
-  - Temporary pending items (`id.startsWith('__pending__:')`) are tracked separately or resolved before `validateWorkspace`.
 
 ---
 
-## 5. Awareness State Shape (`AwarenessUserState`)
+## 4. Operation Model & Lease Locks (v2)
+
+> [!WARNING]
+> **Superseded by ARCHITECTURE-v2.md (Server-ordered ops + lease locks, no Yjs)**.
+> Yjs document types (`Y.Doc`, `Y.Map`, `Y.Array`, `Y.Text`) and binary updates have been completely removed.
+> The authoritative collaboration model uses server-ordered granular operations, atomic sequence numbers (`seq`), explicit lease locks (`LockState`), and standard JSON `Workspace` snapshots.
+
+### 4.1 Granular Operations (`CollabOp`)
+The server executes mutations sequentially in a single-threaded queue. The supported operations are:
+- `item.create`: Append or insert a new item into a function.
+- `item.edit`: Update column values of an existing item. Requires an active lease lock on `item:<id>`.
+- `item.delete`: Delete an item and record its ID in `retiredIds`. Automatically releases any held lock.
+- `item.reorder`: Change item order within a function.
+- `function.create`: Create a function in a module.
+- `function.edit`: Rename, update prefix, or change function properties.
+- `function.editScope`: Update Markdown scope description. Requires an active lease lock on `function:<id>:scope`.
+- `function.delete`: Delete a function and its items (retiring all item IDs). Requires that no other user holds locks inside the function.
+- `function.reorder`: Change function display ordering.
+- `module.create`: Create a module or submodule.
+- `module.edit`: Rename or update prefix/description of a module.
+- `module.delete`: Delete a module and its entire subtree. Requires that no other user holds locks inside the subtree.
+- `module.reorder`: Change module display ordering.
+- `config.update`: Update project configuration (`project.config.json`). Allowed for `ROOM_ADMIN` and `ROOM_OWNER` only; immutable fields (`projectId`, `version`) are rejected.
+
+### 4.2 Lease Locks (`LockState`)
+- **Granularity**: `item:<id>` (editing row values) and `function:<id>:scope` (editing function Markdown scope).
+- **Lease duration**: 10 seconds.
+- **Renewal**: Automatic heartbeat every 3 seconds while editing.
+- **Grace period**: 30 seconds upon socket disconnect for seamless page reload / reconnect.
+- **Hierarchy deletion guard**: Deleting a module or function checks the entire subtree; if any item or function inside holds an active lock by another user, the deletion is rejected with `SUBTREE_LOCKED`.
+
+---
+
+## 5. Presence State Shape (`PresenceState` & `PresenceBroadcastEntry`)
+
+Presence is ephemeral, unlogged, and throttled (max 10 updates/sec per client):
 
 ```ts
 export const COLLAB_USER_COLORS = [
@@ -297,25 +320,25 @@ export const COLLAB_USER_COLORS = [
   '#84cc16', // Lime
 ] as const;
 
-export interface AwarenessUserState {
+export interface PresenceState {
+  cursor?: { x: number; y: number } | null;
+  selection?: {
+    field?: string;
+    range?: { start: number; end: number };
+  } | null;
+  objectType?: ObjectType | null;
+  targetKind?: 'module' | 'function' | 'item' | null;
+  targetId?: string | null;
+  updatedAt: number; // Epoch ms
+}
+
+export interface PresenceBroadcastEntry {
   userId: string;
   username: string;
   displayName: string;
   role: RoomRole;
-  color: string; // Assigned deterministically from COLLAB_USER_COLORS by userId hash
-  view: {
-    objectType: ObjectType;
-    kind: 'root' | 'module' | 'function';
-    id: string | null; // module.id or fn.functionId
-  } | null;
-  focus: {
-    objectType: ObjectType;
-    functionId: string; // or moduleId when editing module description
-    itemId: string;     // item.id, '__new__', or '__scope__' for function/module description
-    columnId: string;   // column.id or 'description'
-    cursor?: { anchor: number; head: number } | null;
-  } | null;
-  updatedAt: number; // Epoch ms
+  color: string;
+  presence: PresenceState | null;
 }
 ```
 
@@ -386,6 +409,7 @@ CREATE TABLE IF NOT EXISTS rooms (
   owner_id TEXT NOT NULL REFERENCES users(id),
   project_id TEXT NOT NULL,
   project_name TEXT NOT NULL,
+  materialized_seq INTEGER NOT NULL DEFAULT 0,
   last_autosaved_at TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -448,11 +472,16 @@ CREATE TABLE IF NOT EXISTS revisions (
   UNIQUE (room_id, seq)
 );
 
-CREATE TABLE IF NOT EXISTS yjs_updates (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS room_ops (
   room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-  update_blob BLOB NOT NULL,
-  created_at TEXT NOT NULL
+  seq INTEGER NOT NULL,
+  op_id TEXT NOT NULL,
+  actor_id TEXT NOT NULL REFERENCES users(id),
+  op_kind TEXT NOT NULL,
+  op_payload TEXT NOT NULL,                             -- JSON-encoded CollabOp
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (room_id, seq),
+  UNIQUE (room_id, op_id)
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (

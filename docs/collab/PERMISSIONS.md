@@ -69,21 +69,21 @@ Ordered from highest to lowest privilege within a room:
 | `room:request-join` | Send join request to a `listed` room (if not member/banned) | **Yes** | No | No | No | No | `src/server/rooms.ts` (`createJoinRequest`), `POST /api/rooms/:id/join-requests` |
 | `room:accept-direct-invite` | Accept/decline a pending direct invite to this user | **Yes** (invitee) | — | — | — | — | `src/server/rooms.ts` (`respondToInvite`), `POST /api/invites/:inviteId/respond` |
 | `room:redeem-invite-code` | Join room using a valid, non-expired, under-limit invite code | **Yes** (if not banned) | — | — | — | — | `src/server/rooms.ts` (`redeemInviteCode`), `POST /api/invites/redeem` |
-| `room:connect-ws` | Open live WebSocket session to the room & receive `Y.Doc` sync | No | **Yes** | **Yes** | **Yes** | **Yes** | `src/server/wsHandler.ts` (WS auth handshake) |
-| `room:broadcast-view-presence` | Publish awareness of current viewed module/function | No | **Yes** | **Yes** | **Yes** | **Yes** | `src/server/wsHandler.ts` (`handleAwarenessFrame`) |
-| `room:broadcast-field-focus` | Publish awareness of focused/editing field (`focus` highlight/lock) | No | **No** (stripped) | **Yes** | **Yes** | **Yes** | `src/server/wsHandler.ts` (`handleAwarenessFrame` strips `focus` for `VIEWER`) |
+| `room:connect-ws` | Open live WebSocket session to the room & receive `room-welcome` and op stream | No | **Yes** | **Yes** | **Yes** | **Yes** | `src/server/wsHandler.ts` (WS auth handshake) |
+| `room:broadcast-presence` | Publish ephemeral presence (cursor, selection, target view) | No | **Yes** | **Yes** | **Yes** | **Yes** | `src/server/wsHandler.ts` (`handlePresenceUpdateFrame`) |
+| `room:acquire-lock` | Acquire/renew lease lock on item row or function scope | No | **No** (rejected) | **Yes** | **Yes** | **Yes** | `src/server/locks.ts`, `src/shared/collab/permissions.ts` |
 | `room:export` | Export room workspace (CSV, Markdown, or full JSON workspace) | No | **Yes** | **Yes** | **Yes** | **Yes** | `canRoomAction`, `GET /api/rooms/:id/export` & client export |
 | `room:leave` | Voluntarily leave the room | No | **Yes** | **Yes** | **Yes** | **No** (must transfer ownership or delete room first) | `canRoomAction`, `src/server/rooms.ts`, `POST /api/rooms/:id/leave` |
-| `item:create` | Create new requirement / item (`alloc-item` or pending row) | No | No | **Yes** | **Yes** | **Yes** | `canRoomAction`, `src/server/roomRuntime.ts` (`allocateItem` & `applyClientUpdate`) |
-| `item:edit` | Edit item column values (`Y.Text` or scalar `Y.Map`) | No | No | **Yes** | **Yes** | **Yes** | `canRoomAction`, `src/server/roomRuntime.ts` (`validateYDocDiffPermissions`) |
-| `item:delete` | Delete an item (and retire its permanent ID) | No | No | **Yes** | **Yes** | **Yes** | `canRoomAction`, `src/server/roomRuntime.ts` (`validateYDocDiffPermissions`) |
-| `hierarchy:create-module` | Create module or submodule | No | No | **Yes** | **Yes** | **Yes** | `canRoomAction`, `src/server/roomRuntime.ts` (`validateYDocDiffPermissions`) |
-| `hierarchy:edit-module` | Rename module, change module prefix, or edit module description | No | No | **Yes** | **Yes** | **Yes** | `canRoomAction`, `src/server/roomRuntime.ts` (`validateYDocDiffPermissions`) |
-| `hierarchy:create-function` | Create leaf function group | No | No | **Yes** | **Yes** | **Yes** | `canRoomAction`, `src/server/roomRuntime.ts` (`validateYDocDiffPermissions`) |
-| `hierarchy:edit-function` | Edit function name, prefix, or scope Markdown `description` | No | No | **Yes** | **Yes** | **Yes** | `canRoomAction`, `src/server/roomRuntime.ts` (`validateYDocDiffPermissions`) |
-| `hierarchy:delete-module` | Delete module and its subtree (retiring all contained item IDs) | No | No | **No** | **Yes** | **Yes** | `canRoomAction`, `src/server/roomRuntime.ts` (`validateYDocDiffPermissions`) |
-| `hierarchy:delete-function` | Delete function (retiring all contained item IDs) | No | No | **No** | **Yes** | **Yes** | `canRoomAction`, `src/server/roomRuntime.ts` (`validateYDocDiffPermissions`) |
-| `project:edit-settings` | Edit `project.config.json` (prefixes, casing, object enablement, columns) | No | No | **No** | **Yes** | **Yes** | `canRoomAction`, `src/server/roomRuntime.ts` (`validateYDocDiffPermissions`) |
+| `item:create` | Create new requirement / item (`item.create` op) | No | No | **Yes** | **Yes** | **Yes** | `authorizeOp`, `src/server/roomRuntime.ts` |
+| `item:edit` | Edit item column values (`item.edit` op, requires lease lock) | No | No | **Yes** | **Yes** | **Yes** | `authorizeOp`, `src/server/roomRuntime.ts` |
+| `item:delete` | Delete an item (retiring permanent ID and releasing lock) | No | No | **Yes** | **Yes** | **Yes** | `authorizeOp`, `src/server/roomRuntime.ts` |
+| `hierarchy:create-module` | Create module or submodule (`module.create` op) | No | No | **Yes** | **Yes** | **Yes** | `authorizeOp`, `src/server/roomRuntime.ts` |
+| `hierarchy:edit-module` | Rename module, change module prefix/description (`module.edit` op) | No | No | **Yes** | **Yes** | **Yes** | `authorizeOp`, `src/server/roomRuntime.ts` |
+| `hierarchy:create-function` | Create leaf function group (`function.create` op) | No | No | **Yes** | **Yes** | **Yes** | `authorizeOp`, `src/server/roomRuntime.ts` |
+| `hierarchy:edit-function` | Edit function name/prefix (`function.edit` op) or scope (`function.editScope` op) | No | No | **Yes** | **Yes** | **Yes** | `authorizeOp`, `src/server/roomRuntime.ts` |
+| `hierarchy:delete-module` | Delete module and its subtree (checks subtree locks) | No | No | **No** | **Yes** | **Yes** | `authorizeOp`, `src/server/roomRuntime.ts` |
+| `hierarchy:delete-function` | Delete function (checks subtree locks) | No | No | **No** | **Yes** | **Yes** | `authorizeOp`, `src/server/roomRuntime.ts` |
+| `project:edit-settings` | Edit `project.config.json` (prefixes, casing, object enablement, columns) | No | No | **No** | **Yes** | **Yes** | `authorizeOp`, `src/server/roomRuntime.ts` |
 | `revision:save` | Save a named, immutable revision snapshot | No | No | **No** | **Yes** | **Yes** | `canRoomAction`, `src/server/revisions.ts`, `POST /api/rooms/:id/revisions` |
 | `revision:history-diff` | View full revision history list and compare revision diffs | No | No | **No** | **Yes** | **Yes** | `canRoomAction`, `src/server/revisions.ts`, `GET /api/rooms/:id/revisions` & `.../diff` |
 | `revision:restore` | Restore a past revision (creating a new revision snapshot) | No | No | **No** | **Yes** | **Yes** | `canRoomAction`, `src/server/revisions.ts`, `POST /api/rooms/:id/revisions/:revId/restore` |
@@ -107,29 +107,33 @@ Ordered from highest to lowest privilege within a room:
 All permission rules are implemented as pure, deterministic functions tested in `tests/unit/collabPermissions.test.ts`:
 - `canServerAction(actorRole: ServerRole, action: ServerAction, context?: { targetRole?: ServerRole; roomCreationMode?: RoomCreationMode }): boolean`
 - `canRoomAction(actorRoomRole: RoomRole | null, action: RoomAction, context?: { targetRoomRole?: RoomRole; assignedRole?: RoomRole; actorServerRole?: ServerRole }): boolean`
-- `validateYDocDiffPermissions(actorRoomRole: RoomRole, prevWorkspace: Workspace, nextWorkspace: Workspace): { ok: true } | { ok: false; code: 'FORBIDDEN' | 'CONFLICT'; message: string }`
+- `authorizeOp(role: RoomRole, op: CollabOp, lockState?: LockState, workspace?: Workspace, actor?: { userId: string }): AuthorizeOpResult`
 
 ### 4.2 REST API Layer (`src/server/httpServer.ts`, `src/server/auth.ts`, `src/server/rooms.ts`, `src/server/revisions.ts`)
 - Every `/api/*` endpoint (except `/api/server/info`, `/api/auth/setup`, `/api/auth/register`, `/api/auth/login`) extracts the Bearer token via `AuthService.authenticateRequest(req)`.
 - Disabled accounts (`status !== 'ACTIVE'`) and expired sessions are rejected with `401 UNAUTHORIZED`.
 - Each service method calls `canServerAction` or `canRoomAction` against the database's current authoritative role before executing any mutation. Violations return `403 FORBIDDEN`.
 
-### 4.3 WebSocket & Yjs Update Layer (`src/server/wsHandler.ts`, `src/server/roomRuntime.ts`)
+### 4.3 WebSocket & Operation Authorization Layer (`src/shared/collab/permissions.ts`, `src/server/wsHandler.ts`, `src/server/roomRuntime.ts`)
 - **Connection Handshake**: Verifies session token, checks that the user is an active member of `roomId` and not banned, and attaches `(userId, roomRole)` to the connection context.
 - **Live Role/Membership Revocation**: When a member's role is changed (`PATCH /api/rooms/:id/members/:userId`) or the member is kicked/banned:
   - `RoomRuntime` immediately updates the live socket's `roomRole` in memory (or terminates the socket on kick/ban with `{ type: 'kicked' | 'banned' }`).
-  - Therefore, a user demoted to `VIEWER` cannot send any further write frames on an already-open WebSocket!
-- **Yjs Binary Update Verification (`RoomRuntime.applyClientUpdate`)**:
-  1. If `socket.roomRole === 'VIEWER'`, the update is rejected immediately before touching `Y.Doc`.
-  2. For `EDITOR`, `ROOM_ADMIN`, and `ROOM_OWNER`, `RoomRuntime` clones `room.ydoc` into a temporary `stagedDoc`, applies the binary update to `stagedDoc`, converts `stagedDoc` to `nextWorkspace`, and runs `validateYDocDiffPermissions(socket.roomRole, prevWorkspace, nextWorkspace)`:
-     - Rejects if `socket.roomRole === 'EDITOR'` and `config` changed (`project:edit-settings` violation).
-     - Rejects if `socket.roomRole === 'EDITOR'` and any module ID or function ID present in `prevWorkspace` was removed (`hierarchy:delete-module` / `hierarchy:delete-function` violation).
-     - Rejects if `watermarkCounter` decreased or any `retiredIds` entry was removed.
-     - Detects structural conflicts (e.g. an edit inside a module/function that was concurrently deleted) and resolves deterministically in favor of the deletion.
-  3. On rejection, the server leaves `room.ydoc` untouched, sends `{ type: 'error', code: 'FORBIDDEN' | 'VALIDATION_ERROR', message }` to the sender, and sends a corrective `sync-step2` frame so the sender's local `Y.Doc` reverts to the server's authoritative state.
+  - Therefore, a user demoted to `VIEWER` cannot execute any subsequent mutation ops on an already-open WebSocket.
+- **Granular Operation Authorization (`authorizeOp`)**:
+  1. **Role capability**: `VIEWER` cannot perform any mutation ops (`UNAUTHORIZED_ROLE`). `EDITOR` cannot perform `config.update`, `module.delete`, or `function.delete`. `ROOM_ADMIN` and `ROOM_OWNER` have full administrative mutation rights.
+  2. **Target existence**: Checked against the current authoritative `Workspace`. If the target item, function, or module does not exist, the op is rejected with `TARGET_NOT_FOUND`.
+  3. **Lock ownership**:
+     - `item.edit` requires that the actor holds an active lease lock on `item:<id>`. If unheld or held by another user, the op is rejected with `LOCKED`.
+     - `function.editScope` requires that the actor holds `function:<id>:scope`.
+  4. **Subtree locks on deletion**:
+     - `module.delete` and `function.delete` verify whether any other user holds an active lock on any item or function within the deleted subtree. If so, the operation is rejected with `SUBTREE_LOCKED`.
+  5. **Project config immutability**:
+     - `config.update` cannot alter `projectId` or `version`; doing so is rejected with `INVALID_MUTATION`.
+  6. On rejection, the server sends `{ type: 'op-rejected', clientOpId, code, reason }` to the sender without altering state or advancing sequence numbers.
 
 ### 4.4 Client Renderer UI Layer (`src/renderer/`)
 - `VIEWER`: "Add module", "Add submodule", "Add function", "Properties", "Delete", "Add requirement/item", inline cell editing, scope textarea editing, "Project settings", and "Save revision" buttons are disabled/hidden. Export and search remain enabled.
 - `EDITOR`: "Delete" on modules/functions, "Project settings", "Save revision", and "Revisions history/restore" are disabled/hidden. Creating/editing modules and functions and adding/editing/deleting items are enabled.
 - `ROOM_ADMIN`: Full workspace editing, module/function deletion, project settings, member invitations, join request review, and revision save/history/diff/restore are enabled. Ownership transfer and room deletion are hidden.
 - `ROOM_OWNER`: All room controls enabled.
+

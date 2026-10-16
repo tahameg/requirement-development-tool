@@ -76,6 +76,7 @@ CREATE TABLE IF NOT EXISTS rooms (
   project_id TEXT NOT NULL,
   project_name TEXT NOT NULL,
   last_autosaved_at TEXT,
+  materialized_seq INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -137,11 +138,17 @@ CREATE TABLE IF NOT EXISTS revisions (
   UNIQUE (room_id, seq)
 );
 
-CREATE TABLE IF NOT EXISTS yjs_updates (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+CREATE TABLE IF NOT EXISTS room_ops (
   room_id TEXT NOT NULL REFERENCES rooms(id) ON DELETE CASCADE,
-  update_blob BLOB NOT NULL,
-  created_at TEXT NOT NULL
+  seq INTEGER NOT NULL,
+  op_id TEXT NOT NULL,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  kind TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  result_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (room_id, seq),
+  UNIQUE (room_id, op_id)
 );
 
 CREATE TABLE IF NOT EXISTS audit_log (
@@ -162,7 +169,7 @@ CREATE INDEX IF NOT EXISTS idx_invites_target_user_id ON invites(target_user_id)
 CREATE INDEX IF NOT EXISTS idx_join_requests_room_id ON join_requests(room_id);
 CREATE INDEX IF NOT EXISTS idx_join_requests_user_id ON join_requests(user_id);
 CREATE INDEX IF NOT EXISTS idx_revisions_room_id ON revisions(room_id);
-CREATE INDEX IF NOT EXISTS idx_yjs_updates_room_id ON yjs_updates(room_id);
+CREATE INDEX IF NOT EXISTS idx_room_ops_room_id ON room_ops(room_id);
 CREATE INDEX IF NOT EXISTS idx_audit_log_room_id ON audit_log(room_id);
 `;
 
@@ -203,6 +210,7 @@ export interface RoomRow {
   project_id: string;
   project_name: string;
   last_autosaved_at: string | null;
+  materialized_seq: number;
   created_at: string;
   updated_at: string;
 }
@@ -261,10 +269,14 @@ export interface RevisionRow {
   created_at: string;
 }
 
-export interface YjsUpdateRow {
-  id: number;
+export interface RoomOpRow {
   room_id: string;
-  update_blob: Buffer;
+  seq: number;
+  op_id: string;
+  user_id: string;
+  kind: string;
+  payload_json: string;
+  result_json: string;
   created_at: string;
 }
 

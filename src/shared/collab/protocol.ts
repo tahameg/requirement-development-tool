@@ -1,11 +1,14 @@
 import { z } from 'zod';
-import { itemSchema, objectTypeSchema, workspaceSchema } from '../types/schema.js';
+import { hierarchyCommandSchema } from '../hierarchy.js';
+import { objectTypeSchema, projectConfigSchema, workspaceSchema } from '../types/schema.js';
 import {
   API_ERROR_CODES,
+  COLLAB_OP_KINDS,
   DISCOVERY_BEACON_MAGIC,
   INVITE_KINDS,
   INVITE_STATUSES,
   JOIN_REQUEST_STATUSES,
+  OP_REJECT_CODES,
   REGISTRATION_MODES,
   ROOM_CREATION_MODES,
   ROOM_ROLES,
@@ -27,10 +30,6 @@ const isoDateTimeSchema = z.string().datetime();
 const fingerprintSchema = z
   .string()
   .regex(/^SHA256:[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2})+$/, 'Expected SHA256:<hex-colon-separated> fingerprint');
-const base64Schema = z
-  .string()
-  .min(1)
-  .regex(/^[A-Za-z0-9+/]+={0,2}$/, 'Expected base64 string');
 const primitiveCellValueSchema = z.union([z.string(), z.number().finite(), z.boolean(), z.null()]);
 
 export const serverRoleSchema = z.enum(SERVER_ROLES);
@@ -208,10 +207,7 @@ export const inviteCodeInfoSchema = z
   })
   .strict();
 
-export const inviteInfoSchema = z.discriminatedUnion('kind', [
-  directInviteSummarySchema,
-  inviteCodeInfoSchema,
-]);
+export const inviteInfoSchema = z.union([directInviteSummarySchema, inviteCodeInfoSchema]);
 
 export const joinRequestSummarySchema = z
   .object({
@@ -234,8 +230,8 @@ export const revisionMetadataSchema = z
   .object({
     id: nonEmptyString,
     roomId: nonEmptyString,
-    seq: z.number().int().positive(),
-    message: trimmedName,
+    seq: z.number().int().nonnegative(),
+    message: z.string(),
     authorId: nonEmptyString,
     authorName: trimmedName,
     snapshotFilename: nonEmptyString,
@@ -248,7 +244,7 @@ export const revisionDiffEntityChangeSchema = z
   .object({
     id: nonEmptyString,
     objectType: objectTypeSchema,
-    name: trimmedName,
+    name: z.string(),
   })
   .strict();
 
@@ -257,7 +253,7 @@ export const revisionDiffItemChangeSchema = z
     id: nonEmptyString,
     objectType: objectTypeSchema,
     functionId: nonEmptyString,
-    changedColumns: z.array(nonEmptyString).optional(),
+    changedColumns: z.array(z.string()).optional(),
   })
   .strict();
 
@@ -303,7 +299,7 @@ export const auditEntrySchema = z
   })
   .strict();
 
-// --- 2.1 Public & Authentication REST Schemas ---
+// --- REST Endpoint Payload Schemas ---
 
 export const setupRequestSchema = z
   .object({
@@ -311,14 +307,6 @@ export const setupRequestSchema = z
     username: usernameSchema,
     displayName: trimmedName,
     password: passwordSchema,
-  })
-  .strict();
-
-export const authSessionResponseSchema = z
-  .object({
-    user: userProfileSchema,
-    token: nonEmptyString,
-    expiresAt: isoDateTimeSchema,
   })
   .strict();
 
@@ -330,23 +318,6 @@ export const registerRequestSchema = z
   })
   .strict();
 
-export const registerResponseSchema = z.discriminatedUnion('status', [
-  z
-    .object({
-      status: z.literal('ACTIVE'),
-      user: userProfileSchema,
-      token: nonEmptyString,
-      expiresAt: isoDateTimeSchema,
-    })
-    .strict(),
-  z
-    .object({
-      status: z.literal('PENDING_APPROVAL'),
-      user: userProfileSchema,
-    })
-    .strict(),
-]);
-
 export const loginRequestSchema = z
   .object({
     username: usernameSchema,
@@ -355,6 +326,25 @@ export const loginRequestSchema = z
   .strict();
 
 export const logoutRequestSchema = z.object({}).strict();
+
+export const authSessionResponseSchema = z
+  .object({
+    status: z.literal('ACTIVE').optional(),
+    user: userProfileSchema,
+    token: nonEmptyString,
+    expiresAt: isoDateTimeSchema,
+  })
+  .strict();
+
+export const registerResponseSchema = z.union([
+  authSessionResponseSchema,
+  z
+    .object({
+      status: z.literal('PENDING_APPROVAL'),
+      user: userProfileSchema,
+    })
+    .strict(),
+]);
 
 export const logoutResponseSchema = z
   .object({
@@ -374,8 +364,6 @@ export const userDirectoryResponseSchema = z
   })
   .strict();
 
-// --- 2.2 Server Administration REST Schemas ---
-
 export const updateServerSettingsRequestSchema = z
   .object({
     name: trimmedName.optional(),
@@ -384,11 +372,11 @@ export const updateServerSettingsRequestSchema = z
   })
   .strict()
   .refine(
-    val =>
-      val.name !== undefined ||
-      val.registrationMode !== undefined ||
-      val.roomCreationMode !== undefined,
-    { message: 'At least one setting field must be provided' },
+    data =>
+      data.name !== undefined ||
+      data.registrationMode !== undefined ||
+      data.roomCreationMode !== undefined,
+    'At least one setting must be provided for update',
   );
 
 export const updateServerSettingsResponseSchema = z
@@ -420,17 +408,15 @@ export const adminUserResponseSchema = z
 
 export const adminUpdateUserRequestSchema = z
   .object({
-    status: z.enum(['ACTIVE', 'DISABLED']).optional(),
-    serverRole: z.enum(['USER', 'SERVER_ADMIN']).optional(),
+    status: userStatusSchema.optional(),
+    serverRole: serverRoleSchema.optional(),
     displayName: trimmedName.optional(),
   })
   .strict()
   .refine(
-    val =>
-      val.status !== undefined ||
-      val.serverRole !== undefined ||
-      val.displayName !== undefined,
-    { message: 'At least one field must be provided' },
+    data =>
+      data.status !== undefined || data.serverRole !== undefined || data.displayName !== undefined,
+    'At least one user field must be provided for update',
   );
 
 export const adminResetPasswordRequestSchema = z
@@ -463,8 +449,6 @@ export const auditListResponseSchema = z
     entries: z.array(auditEntrySchema),
   })
   .strict();
-
-// --- 2.3 Room Lobby, Membership, Invites & Join Requests REST Schemas ---
 
 export const listRoomsResponseSchema = z
   .object({
@@ -511,9 +495,10 @@ export const updateRoomRequestSchema = z
     visibility: roomVisibilitySchema.optional(),
   })
   .strict()
-  .refine(val => val.name !== undefined || val.visibility !== undefined, {
-    message: 'At least one room field must be provided',
-  });
+  .refine(
+    data => data.name !== undefined || data.visibility !== undefined,
+    'At least one room attribute must be provided for update',
+  );
 
 export const deleteRoomResponseSchema = z
   .object({
@@ -595,7 +580,7 @@ export const revokeInviteResponseSchema = z
 
 export const createJoinRequestSchema = z
   .object({
-    message: z.string().max(500).optional(),
+    message: z.string().max(1000).optional(),
   })
   .strict();
 
@@ -610,7 +595,11 @@ export const reviewJoinRequestSchema = z
     approve: z.boolean(),
     role: belowAdminRoomRoleSchema.optional(),
   })
-  .strict();
+  .strict()
+  .refine(
+    data => !data.approve || data.role !== undefined,
+    'Approving a join request requires specifying an assigned role',
+  );
 
 export const updateRoomMemberRoleRequestSchema = z
   .object({
@@ -626,7 +615,7 @@ export const updateRoomMemberRoleResponseSchema = z
 
 export const kickOrBanMemberRequestSchema = z
   .object({
-    reason: z.string().max(500).optional(),
+    reason: z.string().max(1000).optional(),
   })
   .strict();
 
@@ -662,8 +651,6 @@ export const roomExportResponseSchema = z
     content: z.union([z.string(), workspaceSchema]),
   })
   .strict();
-
-// --- 2.4 Revisions REST Schemas ---
 
 export const listRevisionsResponseSchema = z
   .object({
@@ -703,93 +690,311 @@ export const restoreRevisionResponseSchema = z
   })
   .strict();
 
-// --- 3 & 5. Awareness & WebSocket Protocol Schemas ---
+// --- Architecture v2: Operations, Locks, Presence, and WebSocket Schemas ---
 
-export const awarenessViewSchema = z
+export const collabOpKindSchema = z.enum(COLLAB_OP_KINDS);
+export const opRejectCodeSchema = z.enum(OP_REJECT_CODES);
+
+export const hierarchyOpPayloadSchema = hierarchyCommandSchema;
+
+export const itemAddOpPayloadSchema = z
   .object({
     objectType: objectTypeSchema,
-    kind: z.enum(['root', 'module', 'function']),
-    id: nonEmptyString.nullable(),
+    functionId: nonEmptyString,
+    values: z.record(primitiveCellValueSchema),
   })
   .strict();
 
-export const awarenessCursorSchema = z
-  .object({
-    anchor: z.number().int().nonnegative(),
-    head: z.number().int().nonnegative(),
-  })
-  .strict();
-
-export const awarenessFocusSchema = z
+export const itemEditOpPayloadSchema = z
   .object({
     objectType: objectTypeSchema,
     functionId: nonEmptyString,
     itemId: nonEmptyString,
-    columnId: nonEmptyString,
-    cursor: awarenessCursorSchema.nullable().optional(),
+    values: z.record(primitiveCellValueSchema),
   })
   .strict();
 
-export const awarenessUserStateSchema = z
+export const itemDeleteOpPayloadSchema = z
   .object({
-    userId: nonEmptyString,
-    username: usernameSchema,
-    displayName: trimmedName,
-    role: roomRoleSchema,
-    color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
-    view: awarenessViewSchema.nullable(),
-    focus: awarenessFocusSchema.nullable(),
-    updatedAt: z.number().int().nonnegative(),
+    objectType: objectTypeSchema,
+    functionId: nonEmptyString,
+    itemId: nonEmptyString,
   })
   .strict();
 
-export const onlineMemberInfoSchema = z
+export const functionDescriptionOpPayloadSchema = z
   .object({
-    userId: nonEmptyString,
-    username: usernameSchema,
-    displayName: trimmedName,
-    role: roomRoleSchema,
-    color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+    objectType: objectTypeSchema,
+    functionId: nonEmptyString,
+    description: z.string(),
   })
   .strict();
 
-export const wsClientMessageSchema = z.discriminatedUnion('type', [
+export const configUpdateOpPayloadSchema = projectConfigSchema;
+
+export const roomRestoreOpPayloadSchema = z
+  .object({
+    revisionId: nonEmptyString,
+  })
+  .strict();
+
+export const collabOpSchema = z.discriminatedUnion('kind', [
   z
     .object({
-      type: z.literal('sync-step1'),
-      stateVector: base64Schema,
+      opId: nonEmptyString,
+      kind: z.literal('hierarchy'),
+      payload: hierarchyOpPayloadSchema,
     })
     .strict(),
   z
     .object({
-      type: z.literal('sync-update'),
-      update: base64Schema,
-      clientOpId: nonEmptyString.optional(),
+      opId: nonEmptyString,
+      kind: z.literal('item.add'),
+      payload: itemAddOpPayloadSchema,
     })
     .strict(),
   z
     .object({
-      type: z.literal('awareness-update'),
-      state: awarenessUserStateSchema.nullable(),
+      opId: nonEmptyString,
+      kind: z.literal('item.edit'),
+      payload: itemEditOpPayloadSchema,
     })
     .strict(),
   z
     .object({
-      type: z.literal('alloc-item'),
-      requestId: nonEmptyString,
-      tempId: nonEmptyString,
-      objectType: objectTypeSchema,
-      functionId: nonEmptyString,
-      values: z.record(primitiveCellValueSchema),
+      opId: nonEmptyString,
+      kind: z.literal('item.delete'),
+      payload: itemDeleteOpPayloadSchema,
     })
     .strict(),
   z
     .object({
-      type: z.literal('ping'),
-      timestamp: z.number().int().nonnegative(),
+      opId: nonEmptyString,
+      kind: z.literal('function.description'),
+      payload: functionDescriptionOpPayloadSchema,
+    })
+    .strict(),
+  z
+    .object({
+      opId: nonEmptyString,
+      kind: z.literal('config.update'),
+      payload: configUpdateOpPayloadSchema,
+    })
+    .strict(),
+  z
+    .object({
+      opId: nonEmptyString,
+      kind: z.literal('room.restore'),
+      payload: roomRestoreOpPayloadSchema,
     })
     .strict(),
 ]);
+
+export const lockHolderSchema = z
+  .object({
+    userId: nonEmptyString,
+    name: trimmedName,
+    color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+  })
+  .strict();
+
+export const lockInfoSchema = z
+  .object({
+    holder: lockHolderSchema,
+    expiresAt: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const lockAcquireSchema = z
+  .object({
+    type: z.literal('lock-acquire'),
+    key: nonEmptyString,
+  })
+  .strict();
+
+export const lockReleaseSchema = z
+  .object({
+    type: z.literal('lock-release'),
+    key: nonEmptyString,
+  })
+  .strict();
+
+export const lockHeartbeatSchema = z
+  .object({
+    type: z.literal('lock-heartbeat'),
+    key: nonEmptyString,
+  })
+  .strict();
+
+export const lockForceReleaseSchema = z
+  .object({
+    type: z.literal('lock-force-release'),
+    key: nonEmptyString,
+  })
+  .strict();
+
+export const lockGrantedSchema = z
+  .object({
+    type: z.literal('lock-granted'),
+    key: nonEmptyString,
+    expiresAt: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const lockDeniedSchema = z
+  .object({
+    type: z.literal('lock-denied'),
+    key: nonEmptyString,
+    holder: lockHolderSchema,
+  })
+  .strict();
+
+export const locksChangedSchema = z
+  .object({
+    type: z.literal('locks-changed'),
+    key: nonEmptyString,
+    holder: lockHolderSchema.nullable(),
+  })
+  .strict();
+
+export const presenceViewSchema = z
+  .object({
+    objectType: objectTypeSchema,
+    nodeId: nonEmptyString,
+  })
+  .strict();
+
+export const presenceFocusSchema = z
+  .object({
+    itemId: nonEmptyString,
+    columnId: nonEmptyString,
+  })
+  .strict();
+
+export const presenceStateSchema = z
+  .object({
+    view: presenceViewSchema.nullable(),
+    focus: presenceFocusSchema.nullable(),
+    drafting: nonEmptyString.nullable(),
+  })
+  .strict();
+
+export const presenceBroadcastEntrySchema = z
+  .object({
+    connectionId: nonEmptyString,
+    user: z
+      .object({
+        userId: nonEmptyString,
+        name: trimmedName,
+        color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+      })
+      .strict(),
+    state: presenceStateSchema,
+  })
+  .strict();
+
+export const presenceUpdateMessageSchema = z
+  .object({
+    type: z.literal('presence-update'),
+    view: presenceViewSchema.nullable(),
+    focus: presenceFocusSchema.nullable(),
+    drafting: nonEmptyString.nullable(),
+  })
+  .strict();
+
+export const presenceBroadcastMessageSchema = z
+  .object({
+    type: z.literal('presence'),
+    connectionId: nonEmptyString,
+    user: z
+      .object({
+        userId: nonEmptyString,
+        name: trimmedName,
+        color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
+      })
+      .strict(),
+    state: presenceStateSchema,
+  })
+  .strict();
+
+export const opAckSchema = z
+  .object({
+    type: z.literal('op-ack'),
+    opId: nonEmptyString,
+    seq: z.number().int().nonnegative(),
+    result: z.unknown().optional(),
+  })
+  .strict();
+
+export const opRejectedSchema = z
+  .object({
+    type: z.literal('op-rejected'),
+    opId: nonEmptyString,
+    code: opRejectCodeSchema,
+    message: nonEmptyString,
+  })
+  .strict();
+
+export const opAppliedSchema = z
+  .object({
+    type: z.literal('op-applied'),
+    seq: z.number().int().nonnegative(),
+    op: collabOpSchema,
+    result: z.unknown().optional(),
+  })
+  .strict();
+
+export const opsSinceSchema = z
+  .object({
+    type: z.literal('ops-since'),
+    seq: z.number().int().nonnegative(),
+  })
+  .strict();
+
+export const opsSinceReplySchema = z
+  .object({
+    type: z.literal('ops-since-reply'),
+    sinceSeq: z.number().int().nonnegative(),
+    ops: z.array(
+      z
+        .object({
+          seq: z.number().int().nonnegative(),
+          op: collabOpSchema,
+          result: z.unknown().optional(),
+        })
+        .strict(),
+    ),
+  })
+  .strict();
+
+export const snapshotSchema = z
+  .object({
+    type: z.literal('snapshot'),
+    seq: z.number().int().nonnegative(),
+    workspace: workspaceSchema,
+  })
+  .strict();
+
+export const roomWelcomeSchema = z
+  .object({
+    type: z.literal('room-welcome'),
+    roomId: nonEmptyString,
+    role: roomRoleSchema,
+    seq: z.number().int().nonnegative(),
+    workspace: workspaceSchema,
+    locks: z.record(lockHolderSchema),
+    presence: z.array(presenceBroadcastEntrySchema),
+    members: z.array(roomMemberInfoSchema),
+    autosaveStatus: z
+      .object({
+        status: z.enum(['autosaved', 'saving']),
+        lastAutosavedAt: isoDateTimeSchema.nullable(),
+      })
+      .strict()
+      .optional(),
+    lastRevision: revisionMetadataSchema.nullable().optional(),
+  })
+  .strict();
 
 export const roomNotificationKindSchema = z.enum([
   'user-joined',
@@ -802,53 +1007,47 @@ export const roomNotificationKindSchema = z.enum([
   'ownership-transferred',
 ]);
 
+export const wsClientMessageSchema = z.discriminatedUnion('type', [
+  z
+    .object({
+      type: z.literal('op'),
+      op: collabOpSchema,
+    })
+    .strict(),
+  opsSinceSchema,
+  lockAcquireSchema,
+  lockReleaseSchema,
+  lockHeartbeatSchema,
+  lockForceReleaseSchema,
+  presenceUpdateMessageSchema,
+  z
+    .object({
+      type: z.literal('ping'),
+      timestamp: z.number().int().nonnegative(),
+    })
+    .strict(),
+]);
+
 export const wsServerMessageSchema = z.discriminatedUnion('type', [
+  roomWelcomeSchema,
+  opAckSchema,
+  opRejectedSchema,
+  opAppliedSchema,
+  opsSinceReplySchema,
+  snapshotSchema,
+  lockGrantedSchema,
+  lockDeniedSchema,
+  locksChangedSchema,
+  presenceBroadcastMessageSchema,
   z
     .object({
-      type: z.literal('room-welcome'),
-      roomId: nonEmptyString,
-      role: roomRoleSchema,
-      stateUpdate: base64Schema,
-      awarenessStates: z.array(awarenessUserStateSchema),
-      onlineMembers: z.array(onlineMemberInfoSchema),
-      autosaveStatus: z
-        .object({
-          status: z.enum(['autosaved', 'saving']),
-          lastAutosavedAt: isoDateTimeSchema.nullable(),
-        })
-        .strict(),
-      lastRevision: revisionMetadataSchema.nullable(),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal('sync-step2'),
-      update: base64Schema,
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal('sync-update'),
-      update: base64Schema,
-      actorUserId: nonEmptyString,
-      clientOpId: nonEmptyString.optional(),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal('alloc-item-ack'),
-      requestId: nonEmptyString,
-      tempId: nonEmptyString,
-      objectType: objectTypeSchema,
-      functionId: nonEmptyString,
-      item: itemSchema,
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal('awareness-broadcast'),
-      states: z.array(awarenessUserStateSchema),
-      onlineMembers: z.array(onlineMemberInfoSchema),
+      type: z.literal('room-notification'),
+      kind: roomNotificationKindSchema,
+      message: nonEmptyString,
+      targetUserId: nonEmptyString.optional(),
+      newRole: roomRoleSchema.optional(),
+      joinRequest: joinRequestSummarySchema.optional(),
+      timestamp: isoDateTimeSchema,
     })
     .strict(),
   z
@@ -863,35 +1062,6 @@ export const wsServerMessageSchema = z.discriminatedUnion('type', [
       type: z.literal('revision-saved'),
       revision: revisionMetadataSchema,
       restoredFromId: nonEmptyString.optional(),
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal('room-notification'),
-      kind: roomNotificationKindSchema,
-      message: nonEmptyString,
-      targetUserId: nonEmptyString.optional(),
-      newRole: roomRoleSchema.optional(),
-      joinRequest: joinRequestSummarySchema.optional(),
-      timestamp: isoDateTimeSchema,
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal('conflict'),
-      code: z.enum(['TARGET_DELETED', 'CONCURRENT_STRUCTURE_CHANGE']),
-      targetId: nonEmptyString,
-      message: nonEmptyString,
-      correctiveUpdate: base64Schema,
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal('error'),
-      code: z.enum(['FORBIDDEN', 'PERMISSION_REVOKED', 'VALIDATION_ERROR', 'BAD_REQUEST']),
-      message: nonEmptyString,
-      requestId: nonEmptyString.optional(),
-      correctiveUpdate: base64Schema.optional(),
     })
     .strict(),
   z
@@ -918,9 +1088,17 @@ export const wsServerMessageSchema = z.discriminatedUnion('type', [
       timestamp: z.number().int().nonnegative(),
     })
     .strict(),
+  z
+    .object({
+      type: z.literal('error'),
+      code: nonEmptyString,
+      message: nonEmptyString,
+      requestId: nonEmptyString.optional(),
+    })
+    .strict(),
 ]);
 
-// --- 6. UDP LAN Discovery Beacon Schema ---
+// --- UDP LAN Discovery Beacon Schema ---
 
 export const discoveryBeaconSchema = z
   .object({

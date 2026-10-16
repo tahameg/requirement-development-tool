@@ -104,3 +104,29 @@
 - `CollabServerOptions` defaults `discovery: true` and `discoveryPort: 41234`, targeting both `255.255.255.255` (LAN broadcast) and `127.0.0.1` (loopback) every `3000ms`. In tests or non-discovery scenarios, pass `discovery: false` or `--no-discovery`.
 - `DiscoveryClient.getServers()` returns a sorted list (`online` servers first, then sorted by `lastSeenAt` descending, then by name) with `online` state dynamically checked against `now()`. Call `client.checkStale()` to check and fire `'server-stale'` events.
 - For T07 (`CollabClient` and `DesktopService`), `DiscoveryClient` is ready to be instantiated in the Electron main process and exposed via `DesktopService` IPC methods for discovered server list queries and push notifications to the renderer.
+
+## R01 Protocol and permissions v2, remove Yjs
+
+### What Changed
+- Uninstalled `yjs`, `y-protocols`, and `lib0` from `package.json` and `package-lock.json` using `--ignore-scripts --cache offline/cache/npm`. Verified `grep -ri "yjs" src tests` is completely empty.
+- Deleted `src/shared/collab/yjsDoc.ts` and `tests/unit/yjsDoc.test.ts`.
+- Updated `src/shared/collab/types.ts`:
+  - Defined all 13 v2 `COLLAB_OP_KINDS` (`item.create`, `item.edit`, `item.delete`, `item.reorder`, `function.create`, `function.edit`, `function.editScope`, `function.delete`, `function.reorder`, `module.create`, `module.edit`, `module.delete`, `module.reorder`, `config.update`).
+  - Defined operation payloads and envelope (`CollabOp`), op rejection error codes (`OP_REJECT_CODES`), lock types (`LockHolder`, `LockInfo`, `LockState`), presence types (`PresenceState`, `PresenceBroadcastEntry`), and all v2 WebSocket client and server messages (`WsClientMessage`, `WsServerMessage`).
+- Updated `src/shared/collab/permissions.ts`:
+  - Implemented `authorizeOp(role, op, lockState?, workspace?, actor?)` enforcing role capabilities (`VIEWER` cannot perform mutation ops; `EDITOR` cannot perform `config.update`, `module.delete`, or `function.delete`), target existence, lock ownership for `item.edit` and `function.editScope`, subtree locks preventing deletion when another user holds an active lock within the subtree, and immutability of `project.config.json` fields `projectId` and `version`.
+- Updated `src/shared/collab/protocol.ts`:
+  - Implemented strict Zod wire schemas for all v2 op payloads, `collabOpSchema`, `lockAcquireSchema`, `lockHeartbeatSchema`, `presenceStateSchema`, `presenceBroadcastEntrySchema`, and all `wsClientMessageSchema` and `wsServerMessageSchema` variants.
+- Updated `src/server/db.ts`:
+  - Replaced `yjs_updates` with `room_ops (room_id, seq, op_id, actor_id, op_kind, op_payload, created_at, PRIMARY KEY (room_id, seq), UNIQUE (room_id, op_id))` and added `materialized_seq INTEGER NOT NULL DEFAULT 0` to `rooms`.
+- Updated `src/server/roomRuntime.ts` and `src/server/wsHandler.ts`:
+  - Removed all Yjs imports and adapted to v2 message contracts, using static `WorkspaceIndex.rebuild(workspaceDir, this.workspace)` and adding `getBaseUrl()` and `getWsBaseUrl()` helpers to `CollabServer`.
+- Updated `tests/unit/collabPermissions.test.ts` and `tests/unit/collabProtocol.test.ts`:
+  - Added exhaustive coverage of `authorizeOp` across every role × op kind × lock state combination, expired leases, subtree locking, and malformed payload rejections.
+  - Added schema validation tests for every v2 client and server WebSocket message type.
+- Updated documentation in `docs/collab/PROTOCOL.md`, `docs/collab/PERMISSIONS.md`, `docs/collab/ARCHITECTURE.md`, and `docs/collab/TASKS.md`, marking superseded sections with warning banners pointing to `ARCHITECTURE-v2.md`.
+
+### Decisions Made & Notes for Next Agent (R02)
+- Server op engine in R02 will implement the per-room serial queue (`enqueueOp`), append to `room_ops` before broadcasting `op-applied` and acknowledging with `op-ack`, handle idempotent re-submission via `opId`, and implement catch-up via `ops-since` / `snapshot`.
+- `WorkspaceIndex.rebuild(root, input)` in `src/main/db/sqliteClient.ts` is static and should be called directly followed by `index.close()`.
+- All tests pass (`npm run typecheck`, `npm test` with 92/92 tests green and 100% domain coverage, `npm run build` succeeds).

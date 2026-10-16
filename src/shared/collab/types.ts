@@ -1,4 +1,5 @@
-import type { ObjectType } from '../types/config.js';
+import type { HierarchyCommand } from '../hierarchy.js';
+import type { ObjectType, ProjectConfig } from '../types/config.js';
 import type { Item, Workspace } from '../types/workspace.js';
 
 export const SERVER_ROLES = ['USER', 'SERVER_ADMIN', 'SERVER_OWNER'] as const;
@@ -313,36 +314,6 @@ export interface AuditEntry {
   createdAt: string;
 }
 
-export interface AwarenessViewState {
-  objectType: ObjectType;
-  kind: 'root' | 'module' | 'function';
-  id: string | null;
-}
-
-export interface AwarenessCursorState {
-  anchor: number;
-  head: number;
-}
-
-export interface AwarenessFocusState {
-  objectType: ObjectType;
-  functionId: string;
-  itemId: string;
-  columnId: string;
-  cursor?: AwarenessCursorState | null;
-}
-
-export interface AwarenessUserState {
-  userId: string;
-  username: string;
-  displayName: string;
-  role: RoomRole;
-  color: string;
-  view: AwarenessViewState | null;
-  focus: AwarenessFocusState | null;
-  updatedAt: number;
-}
-
 export interface OnlineMemberInfo {
   userId: string;
   username: string;
@@ -361,27 +332,154 @@ export type RoomNotificationKind =
   | 'member-banned'
   | 'ownership-transferred';
 
+// --- Architecture v2: Server-Ordered Operations & Locks ---
+
+export const COLLAB_OP_KINDS = [
+  'hierarchy',
+  'item.add',
+  'item.edit',
+  'item.delete',
+  'function.description',
+  'config.update',
+  'room.restore',
+] as const;
+export type CollabOpKind = (typeof COLLAB_OP_KINDS)[number];
+
+export type HierarchyOpPayload = HierarchyCommand;
+
+export interface ItemAddOpPayload {
+  objectType: ObjectType;
+  functionId: string;
+  values: Record<string, string | number | boolean | null>;
+}
+
+export interface ItemEditOpPayload {
+  objectType: ObjectType;
+  functionId: string;
+  itemId: string;
+  values: Record<string, string | number | boolean | null>;
+}
+
+export interface ItemDeleteOpPayload {
+  objectType: ObjectType;
+  functionId: string;
+  itemId: string;
+}
+
+export interface FunctionDescriptionOpPayload {
+  objectType: ObjectType;
+  functionId: string;
+  description: string;
+}
+
+export type ConfigUpdateOpPayload = ProjectConfig;
+
+export interface RoomRestoreOpPayload {
+  revisionId: string;
+}
+
+export type CollabOp =
+  | { opId: string; kind: 'hierarchy'; payload: HierarchyOpPayload }
+  | { opId: string; kind: 'item.add'; payload: ItemAddOpPayload }
+  | { opId: string; kind: 'item.edit'; payload: ItemEditOpPayload }
+  | { opId: string; kind: 'item.delete'; payload: ItemDeleteOpPayload }
+  | { opId: string; kind: 'function.description'; payload: FunctionDescriptionOpPayload }
+  | { opId: string; kind: 'config.update'; payload: ConfigUpdateOpPayload }
+  | { opId: string; kind: 'room.restore'; payload: RoomRestoreOpPayload };
+
+export const OP_REJECT_CODES = [
+  'FORBIDDEN',
+  'LOCKED',
+  'NOT_FOUND',
+  'VALIDATION',
+  'CONFLICT',
+  'READ_ONLY',
+] as const;
+export type OpRejectCode = (typeof OP_REJECT_CODES)[number];
+
+export interface LockHolder {
+  userId: string;
+  name: string;
+  color: string;
+}
+
+export interface LockInfo {
+  holder: LockHolder;
+  expiresAt: number; // epoch ms
+}
+
+export type LockState = Record<string, LockHolder>;
+
+export interface PresenceViewState {
+  objectType: ObjectType;
+  nodeId: string;
+}
+
+export interface PresenceFocusState {
+  itemId: string;
+  columnId: string;
+}
+
+export interface PresenceState {
+  view: PresenceViewState | null;
+  focus: PresenceFocusState | null;
+  drafting: string | null; // functionId | null
+}
+
+export interface PresenceBroadcastEntry {
+  connectionId: string;
+  user: {
+    userId: string;
+    name: string;
+    color: string;
+  };
+  state: PresenceState;
+}
+
+// Deprecated alias for backwards compatibility during migration
+export type AwarenessUserState = {
+  userId: string;
+  username: string;
+  displayName: string;
+  role: RoomRole;
+  color: string;
+  view: { objectType: ObjectType; kind: 'root' | 'module' | 'function'; id: string | null } | null;
+  focus: { objectType: ObjectType; functionId: string; itemId: string; columnId: string; cursor?: { anchor: number; head: number } | null } | null;
+  updatedAt: number;
+};
+
+// --- WebSocket Protocol Messages (v2) ---
+
 export type WsClientMessage =
   | {
-      type: 'sync-step1';
-      stateVector: string;
+      type: 'op';
+      op: CollabOp;
     }
   | {
-      type: 'sync-update';
-      update: string;
-      clientOpId?: string;
+      type: 'ops-since';
+      seq: number;
     }
   | {
-      type: 'awareness-update';
-      state: AwarenessUserState | null;
+      type: 'lock-acquire';
+      key: string;
     }
   | {
-      type: 'alloc-item';
-      requestId: string;
-      tempId: string;
-      objectType: ObjectType;
-      functionId: string;
-      values: Record<string, string | number | boolean | null>;
+      type: 'lock-release';
+      key: string;
+    }
+  | {
+      type: 'lock-heartbeat';
+      key: string;
+    }
+  | {
+      type: 'lock-force-release';
+      key: string;
+    }
+  | {
+      type: 'presence-update';
+      view: PresenceViewState | null;
+      focus: PresenceFocusState | null;
+      drafting: string | null;
     }
   | {
       type: 'ping';
@@ -393,34 +491,75 @@ export type WsServerMessage =
       type: 'room-welcome';
       roomId: string;
       role: RoomRole;
-      stateUpdate: string;
-      awarenessStates: AwarenessUserState[];
-      onlineMembers: OnlineMemberInfo[];
-      autosaveStatus: { status: 'autosaved' | 'saving'; lastAutosavedAt: string | null };
-      lastRevision: RevisionMetadata | null;
+      seq: number;
+      workspace: Workspace;
+      locks: Record<string, LockHolder>;
+      presence: PresenceBroadcastEntry[];
+      members: RoomMemberInfo[];
+      autosaveStatus?: { status: 'autosaved' | 'saving'; lastAutosavedAt: string | null };
+      lastRevision?: RevisionMetadata | null;
     }
   | {
-      type: 'sync-step2';
-      update: string;
+      type: 'op-ack';
+      opId: string;
+      seq: number;
+      result?: unknown;
     }
   | {
-      type: 'sync-update';
-      update: string;
-      actorUserId: string;
-      clientOpId?: string;
+      type: 'op-rejected';
+      opId: string;
+      code: OpRejectCode;
+      message: string;
     }
   | {
-      type: 'alloc-item-ack';
-      requestId: string;
-      tempId: string;
-      objectType: ObjectType;
-      functionId: string;
-      item: Item;
+      type: 'op-applied';
+      seq: number;
+      op: CollabOp;
+      result?: unknown;
     }
   | {
-      type: 'awareness-broadcast';
-      states: AwarenessUserState[];
-      onlineMembers: OnlineMemberInfo[];
+      type: 'ops-since-reply';
+      sinceSeq: number;
+      ops: Array<{ seq: number; op: CollabOp; result?: unknown }>;
+    }
+  | {
+      type: 'snapshot';
+      seq: number;
+      workspace: Workspace;
+    }
+  | {
+      type: 'lock-granted';
+      key: string;
+      expiresAt: number;
+    }
+  | {
+      type: 'lock-denied';
+      key: string;
+      holder: LockHolder;
+    }
+  | {
+      type: 'locks-changed';
+      key: string;
+      holder: LockHolder | null;
+    }
+  | {
+      type: 'presence';
+      connectionId: string;
+      user: {
+        userId: string;
+        name: string;
+        color: string;
+      };
+      state: PresenceState;
+    }
+  | {
+      type: 'room-notification';
+      kind: RoomNotificationKind;
+      message: string;
+      targetUserId?: string;
+      newRole?: RoomRole;
+      joinRequest?: JoinRequestSummary;
+      timestamp: string;
     }
   | {
       type: 'autosave-status';
@@ -433,36 +572,29 @@ export type WsServerMessage =
       restoredFromId?: string;
     }
   | {
-      type: 'room-notification';
-      kind: RoomNotificationKind;
-      message: string;
-      targetUserId?: string;
-      newRole?: RoomRole;
-      joinRequest?: JoinRequestSummary;
-      timestamp: string;
+      type: 'kicked';
+      reason: string;
     }
   | {
-      type: 'conflict';
-      code: 'TARGET_DELETED' | 'CONCURRENT_STRUCTURE_CHANGE';
-      targetId: string;
-      message: string;
-      correctiveUpdate: string;
+      type: 'banned';
+      reason: string;
     }
   | {
-      type: 'error';
-      code: 'FORBIDDEN' | 'PERMISSION_REVOKED' | 'VALIDATION_ERROR' | 'BAD_REQUEST';
-      message: string;
-      requestId?: string;
-      correctiveUpdate?: string;
-    }
-  | {
-      type: 'kicked' | 'banned' | 'room-deleted';
+      type: 'room-deleted';
       reason: string;
     }
   | {
       type: 'pong';
       timestamp: number;
+    }
+  | {
+      type: 'error';
+      code: string;
+      message: string;
+      requestId?: string;
     };
+
+// --- UDP Discovery Types ---
 
 export const DISCOVERY_BEACON_MAGIC = 'HLR_SERVER_BEACON_V1' as const;
 export const DEFAULT_DISCOVERY_PORT = 41234;

@@ -267,6 +267,14 @@ export class CollabServer {
     };
   }
 
+  getBaseUrl(): string {
+    return this.getListenInfo().url;
+  }
+
+  getWsBaseUrl(): string {
+    return this.getListenInfo().wsUrl;
+  }
+
   async start(): Promise<CollabServerListenInfo> {
     if (this.httpServer) {
       return this.getListenInfo();

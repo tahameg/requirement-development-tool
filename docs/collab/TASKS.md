@@ -38,7 +38,7 @@ Each implementer session must complete **only the first unchecked task** below, 
 > **Plan v2 (2026-10-16):** T07 onward follow `docs/collab/ARCHITECTURE-v2.md` (server-ordered ops + locks, no Yjs).
 > T02's Yjs code and T05's Yjs core are replaced by R01 to R03. Do not use Yjs anywhere.
 
-- [ ] R01: Protocol and permissions v2, remove Yjs
+- [x] R01: Protocol and permissions v2, remove Yjs
   - Goal: Implement ARCHITECTURE-v2 sections 2, 4, 5, 7 as shared types and Zod schemas: op envelope and all op kinds, `op-ack`, `op-rejected`, `op-applied`, `ops-since`, `snapshot`, `room-welcome`, lock messages, `locks-changed`, presence messages. Replace `validateYDocDiffPermissions` with `authorizeOp`. Delete `src/shared/collab/yjsDoc.ts` and its test, remove `yjs`, `y-protocols`, `lib0` from package.json, lockfile and offline cache. Update `PROTOCOL.md` and `PERMISSIONS.md`, and mark superseded sections in `ARCHITECTURE.md`. Server code that still imports Yjs may be stubbed to compile only if R02 replaces it next; keep tests green.
   - Files: `src/shared/collab/protocol.ts`, `src/shared/collab/permissions.ts`, `src/shared/collab/types.ts`, `package.json`, `package-lock.json`, offline cache manifest, docs
   - Acceptance: schema tests for every message; `authorizeOp` tests for every role x op kind x lock state (viewer always rejected, editor cannot `config.update`/delete module/function, `item.edit` without lock rejected with `LOCKED`, subtree delete rejected while another user holds a lock inside). `grep -r yjs src tests` is empty.

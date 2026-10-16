@@ -62,12 +62,13 @@ flowchart TD
 
 ## 2. New Dependencies & Air-Gapped Rationale
 
-To honor the strict air-gapped constraint (`BRIEF.md` §1.1), only **three pure-JavaScript runtime packages** (plus one TypeScript types package) are added. None use native addons or post-install network scripts:
+> [!WARNING]
+> **Superseded by ARCHITECTURE-v2.md §7**: `yjs`, `y-protocols`, and `lib0` have been uninstalled and completely removed. Only `ws` (`^8.18.0`) and `@types/ws` are required for WebSocket communication.
+
+To honor the strict air-gapped constraint (`BRIEF.md` §1.1), only **one pure-JavaScript runtime package** (plus one TypeScript types package) is added. It uses no native addons or post-install network scripts:
 
 | Package | Role | Why Chosen & Offline Packaging |
 |---|---|---|
-| `yjs` (`^13.6.20`) | CRDT document model (`Y.Doc`, `Y.Map`, `Y.Array`, `Y.Text`) | Industry-standard, zero-dependency (except `lib0`) pure-JS CRDT supporting character-level `Y.Text` merging and offline state vectors. |
-| `y-protocols` (`^1.0.6`) + `lib0` | Binary sync & awareness wire encoding | Official compact binary protocol for Yjs state-vector sync (`syncStep1`, `syncStep2`, `update`) and `Awareness` presence states. Pure JS. |
 | `ws` (`^8.18.0`) + `@types/ws` | WebSocket server & client over Node `http`/`https` | Fast, standard RFC 6455 implementation in pure JS (optional native peer dependencies `bufferutil` and `utf-8-validate` are omitted). |
 
 All other capabilities use Node.js built-ins or existing vendored dependencies:
@@ -93,10 +94,9 @@ hlr-writing-tool/
 │   │   ├── api.ts                             <-- Extended with CollabState, CollabAPI IPC methods & channels
 │   │   ├── appSettings.ts                     <-- Extended with rememberedServers (URL, name, pinnedFingerprint)
 │   │   └── collab/
-│   │       ├── types.ts                       <-- ServerRole, RoomRole, User, Room, Invite, JoinRequest, Revision, AuditEntry, etc.
-│   │       ├── permissions.ts                 <-- Pure permission checks (canServerAction, canRoomAction, validateYDocDiffPermissions)
-│   │       ├── protocol.ts                    <-- Zod schemas for REST bodies/responses, WS frames, Awareness state, UDP beacons
-│   │       └── yjsDoc.ts                      <-- workspaceToYDoc, yDocToWorkspace, applyTextChange, Y.Doc mutation helpers
+│   │       ├── types.ts                       <-- ServerRole, RoomRole, User, Room, CollabOp, LockState, Presence, etc.
+│   │       ├── permissions.ts                 <-- Pure permission checks (canServerAction, canRoomAction, authorizeOp)
+│   │       └── protocol.ts                    <-- Zod wire schemas for REST bodies, v2 WS messages, locks, presence, beacons
 │   ├── server/
 │   │   ├── index.ts                           <-- CLI entrypoint (`npm run server`, parses flags/env, prints setup token)
 │   │   ├── db.ts                              <-- ServerDatabase (better-sqlite3 wrapper & schema for server.sqlite)
@@ -177,6 +177,9 @@ In this repository, `better-sqlite3` is compiled against Electron's Node ABI (`n
 
 ## 5. Data Flow for a Live Edit
 
+> [!WARNING]
+> **Superseded by ARCHITECTURE-v2.md §2 & §4**: Yjs CRDT binary updates, character-level text merging, and scalar soft locks have been replaced by server-ordered granular operations (`CollabOp`) and 10s lease locks (`item:<id>`, `function:<id>:scope`). All edits are authorized by `authorizeOp`.
+
 ### 5.1 Text / Markdown Field Edit (`Y.Text` Character-Level Merge)
 1. **Focus**: User A focuses the Function `description` textarea or a requirement's `col_desc` cell. The renderer notifies `window.hlr.collabFocusField({ functionId, itemId, columnId, cursor })`.
 2. **Awareness Broadcast**: `CollabClient` updates its local `Awareness` state and sends a `ws` `awareness` frame to the server. The server broadcasts the frame to all room peers. User B's renderer immediately draws a colored border (`2px solid <UserA.color>`) and floating name tag (`User A`) around that field.
@@ -200,6 +203,9 @@ In this repository, `better-sqlite3` is compiled against Electron's Node ABI (`n
 
 ## 6. Server-Authoritative ID Allocation
 
+> [!WARNING]
+> **Superseded by ARCHITECTURE-v2.md §2**: Temporary pending IDs (`__pending__:<uuid>`) in Y.Doc are replaced by `item.create` operations. The server processes operations sequentially, atomically generates sequence numbers and IDs via `addItem` during serial execution, and returns the assigned ID in `op-ack` and `op-applied`.
+
 To guarantee `Agents.md` §5 ID immutability under concurrency:
 1. **Pending Row Creation**: When a user adds a row in a room, the client creates a local pending draft with a temporary ID (`__pending__:<uuid>`) and displays the next-ID preview. No permanent ID is consumed while the draft is incomplete.
 2. **Allocation Request**: When the user commits the row (or via `alloc-item` WS message / syncing a `__pending__:<uuid>` item in `Y.Doc`), the client sends `{ type: 'alloc-item', requestId, tempId, objectType, functionId, values }`.
@@ -214,6 +220,10 @@ To guarantee `Agents.md` §5 ID immutability under concurrency:
 ## 7. Autosave and Revisions
 
 ### 7.1 Crash-Safe Continuous Autosave
+
+> [!WARNING]
+> **Superseded by ARCHITECTURE-v2.md §6 & §7**: The `yjs_updates` table has been replaced by `room_ops` (`seq`, `room_id`, `op_id`, `actor_id`, `op_kind`, `op_payload`, `created_at`) and `rooms.materialized_seq`. Autosave debounces saving `Workspace` to disk and updates `materialized_seq`. Crash recovery replays any unmaterialized ops (`seq > materialized_seq`) on top of the saved working copy.
+
 - **Write-Ahead Yjs Log**: Every accepted Yjs update is synchronously written to the `yjs_updates` table in `server.sqlite` (`id INTEGER PRIMARY KEY AUTOINCREMENT, room_id TEXT, update_blob BLOB, created_at TEXT`).
 - **Debounced JSON Materialization**: After `500ms` of inactivity (or max `2000ms` under continuous typing, and immediately on room close / server shutdown), `RoomRuntime` calls `saveWorkspace(roomWorkspaceDir, yDocToWorkspace(room.ydoc))` and rebuilds `.hlr/cache.sqlite`.
 - **Compaction**: Once `saveWorkspace` completes, `RoomRuntime` replaces the room's incremental rows in `yjs_updates` with a single compacted `Y.encodeStateAsUpdate(room.ydoc)` row, updates `rooms.last_autosaved_at`, and broadcasts `{ type: 'autosave-status', status: 'autosaved', autosavedAt }` to all clients.
@@ -231,6 +241,9 @@ To guarantee `Agents.md` §5 ID immutability under concurrency:
 
 ## 8. Offline Mode, Reconnect, and Conflict Resolution
 
+> [!WARNING]
+> **Superseded by ARCHITECTURE-v2.md §2 & §3**: Yjs state vector exchange (`sync-step1`/`sync-step2`) has been replaced by sequence-number-based catch-up (`ops-since` request and `ops-since-reply`). If the client's disconnect gap exceeds retained ops, a full `snapshot` is transferred.
+
 1. **Pure Offline Mode (No Server)**: Selecting **Work offline** uses `DesktopService`'s existing local filesystem and SQLite workflow with zero behavioral changes.
 2. **Temporary Disconnect in a Room**:
    - `CollabClient` tracks connection state: `'connected' | 'reconnecting' | 'offline'`.
@@ -243,6 +256,7 @@ To guarantee `Agents.md` §5 ID immutability under concurrency:
 5. **Deterministic Structural Conflict Resolution**:
    - If User A edits an item or function while offline (or concurrently) inside a module or function that User B (an Admin) deleted, `RoomRuntime` detects that the target function/module no longer exists in the authoritative `Y.Doc`.
    - Deletion wins deterministically: `RoomRuntime` drops the orphaned mutation, preserves the deletion and retired IDs, resynchronizes User A's `Y.Doc` to the authoritative state, and emits `{ type: 'conflict', code: 'TARGET_DELETED', targetId, message: 'The module or function you were editing was deleted by an administrator.' }`, which the UI displays as a clear conflict notice.
+
 
 ---
 
