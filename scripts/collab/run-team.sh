@@ -14,12 +14,20 @@ mkdir -p "$LOG_DIR"
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$STATUS"; }
 
 run_agent() { # $1=name $2=role file
-  local name="$1" role="$2" out="$LOG_DIR/$1.log"
-  log "start $name"
-  agy -p "Read and follow the instructions in $role exactly. Work in this repository: $ROOT" \
-    --model "$MODEL" --dangerously-skip-permissions --print-timeout 0 >"$out" 2>&1
-  local rc=$?
-  log "end $name rc=$rc (log: $out)"
+  local name="$1" role="$2" out="$LOG_DIR/$1.log" rc attempt
+  for attempt in 1 2 3 4 5; do
+    log "start $name (attempt $attempt)"
+    agy -p "Read and follow the instructions in $role exactly. Work in this repository: $ROOT" \
+      --model "$MODEL" --dangerously-skip-permissions --print-timeout 0 >"$out" 2>&1
+    rc=$?
+    log "end $name rc=$rc (log: $out)"
+    [[ $rc -eq 0 ]] && return 0
+    # Retry only transient service errors; anything else is a real failure.
+    grep -qE 'UNAVAILABLE|503|429|RESOURCE_EXHAUSTED|DEADLINE|timeout|ECONNRESET' "$out" || return $rc
+    cp "$out" "$out.attempt$attempt"
+    log "transient service error, retrying in $((attempt * 120))s"
+    sleep $((attempt * 120))
+  done
   return $rc
 }
 
