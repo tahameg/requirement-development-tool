@@ -1,24 +1,21 @@
-import { WorkspaceIndex } from '../main/db/sqliteClient.js';
 import { validateWorkspace } from '../main/services/validation.js';
-import { loadWorkspace, saveWorkspace } from '../main/services/workspaceService.js';
 import {
   assignUserColor,
   type CollabOp,
   type LockHolder,
+  type LockInfo,
   type OnlineMemberInfo,
   type PresenceBroadcastEntry,
   type PresenceState,
   type RevisionMetadata,
+  type RoomMemberInfo,
   type RoomRole,
   type UserProfile,
   type WsServerMessage,
 } from '../shared/collab/types.js';
 import type { Workspace } from '../shared/types/workspace.js';
-import {
-  CollabServiceError,
-  type RevisionRow,
-  type ServerDatabase,
-} from './db.js';
+import { CollabServiceError } from './errors.js';
+import type { RevisionRow, ServerStore } from './store/index.js';
 import type { RoomLifecycleEvent, RoomService } from './rooms.js';
 
 export const DEFAULT_AUTOSAVE_DEBOUNCE_MS = 500;
@@ -44,7 +41,7 @@ export class RoomRuntime {
   readonly roomId: string;
   private workspace!: Workspace;
   private readonly connections = new Map<string, RoomClientConnection>();
-  private readonly locks = new Map<string, LockHolder>();
+  private readonly locks = new Map<string, LockInfo>();
   private readonly autosaveDebounceMs: number;
   private readonly autosaveMaxWaitMs: number;
   private readonly now: () => Date;
@@ -59,7 +56,7 @@ export class RoomRuntime {
 
   constructor(
     roomId: string,
-    private readonly serverDb: ServerDatabase,
+    private readonly store: ServerStore,
     private readonly roomService: RoomService,
     options: RoomRuntimeOptions = {},
   ) {
@@ -71,11 +68,11 @@ export class RoomRuntime {
 
   static async create(
     roomId: string,
-    serverDb: ServerDatabase,
+    store: ServerStore,
     roomService: RoomService,
     options?: RoomRuntimeOptions,
   ): Promise<RoomRuntime> {
-    const runtime = new RoomRuntime(roomId, serverDb, roomService, options);
+    const runtime = new RoomRuntime(roomId, store, roomService, options);
     await runtime.initialize();
     return runtime;
   }
@@ -85,18 +82,12 @@ export class RoomRuntime {
       return;
     }
 
-    const summary = this.roomService.getRoomSummary(this.roomId);
-    this.lastAutosavedAt = summary.lastAutosavedAt;
+    const roomRow = await this.store.rooms.getById(this.roomId);
+    this.lastAutosavedAt = roomRow?.last_autosaved_at ?? null;
+    this.workspace = validateWorkspace(await this.roomService.loadRoomWorkspace(this.roomId));
 
-    const workspaceDir = this.roomService.getRoomWorkspaceDir(this.roomId);
-    const loaded = await loadWorkspace(workspaceDir);
-    this.workspace = validateWorkspace(loaded);
-
-    // Read head sequence from room_ops
-    const maxSeqRow = this.serverDb.db
-      .prepare('SELECT MAX(seq) AS max_seq FROM room_ops WHERE room_id = ?')
-      .get(this.roomId) as { max_seq: number | null } | undefined;
-    this.seq = maxSeqRow?.max_seq ?? 0;
+    const latestSnapshot = await this.store.snapshots.getLatest(this.roomId);
+    this.seq = Math.max(roomRow?.head_seq ?? 0, latestSnapshot?.seq ?? 0);
 
     this.initialized = true;
   }
@@ -117,16 +108,18 @@ export class RoomRuntime {
     return ids;
   }
 
-  getOnlineMembersList(): OnlineMemberInfo[] {
-    const seen = new Map<string, OnlineMemberInfo>();
+  getOnlineMembersList(): RoomMemberInfo[] {
+    const seen = new Map<string, RoomMemberInfo>();
     for (const conn of this.connections.values()) {
       if (!seen.has(conn.user.id)) {
         seen.set(conn.user.id, {
+          roomId: this.roomId,
           userId: conn.user.id,
           username: conn.user.username,
           displayName: conn.user.displayName,
           role: conn.role,
-          color: conn.color,
+          online: true,
+          joinedAt: this.now().toISOString(),
         });
       }
     }
@@ -149,125 +142,87 @@ export class RoomRuntime {
     return list;
   }
 
-  getLocksMap(): Record<string, LockHolder> {
-    const record: Record<string, LockHolder> = {};
-    for (const [key, holder] of this.locks.entries()) {
-      record[key] = holder;
+  getLockState(): Record<string, LockHolder> {
+    const obj: Record<string, LockHolder> = {};
+    for (const [key, info] of this.locks.entries()) {
+      obj[key] = { ...info.holder };
     }
-    return record;
+    return obj;
   }
 
-  getLastRevision(): RevisionMetadata | null {
-    const row = this.serverDb.db
-      .prepare(
-        'SELECT id, room_id, seq, message, author_id, author_name, snapshot_filename, restored_from_id, created_at FROM revisions WHERE room_id = ? ORDER BY seq DESC LIMIT 1',
-      )
-      .get(this.roomId) as RevisionRow | undefined;
-
-    if (!row) return null;
-    return {
-      id: row.id,
-      roomId: row.room_id,
-      seq: row.seq,
-      message: row.message,
-      authorId: row.author_id,
-      authorName: row.author_name,
-      snapshotFilename: row.snapshot_filename,
-      restoredFromId: row.restored_from_id,
-      createdAt: row.created_at,
-    };
-  }
-
-  addClient(connection: {
-    connectionId: string;
-    user: UserProfile;
-    role?: RoomRole;
-    send: (message: WsServerMessage) => void;
-    close: (code?: number, reason?: string) => void;
-  }): void {
+  addClient(connection: RoomClientConnection): void {
     if (this.disposed) {
-      connection.close(1001, 'Room runtime closed');
+      connection.close(1001, 'Room runtime disposed');
       return;
     }
 
-    const currentRole = connection.role ?? this.roomService.getMemberRole(this.roomId, connection.user.id);
-    if (!currentRole) {
-      connection.close(4403, 'User is not a member of this room.');
-      return;
-    }
+    this.connections.set(connection.connectionId, connection);
 
-    const client: RoomClientConnection = {
-      connectionId: connection.connectionId,
-      user: connection.user,
-      role: currentRole,
-      color: assignUserColor(connection.user.id),
-      presence: null,
-      send: connection.send,
-      close: connection.close,
-    };
-
-    this.connections.set(connection.connectionId, client);
-
-    // Send initial authoritative state snapshot to joining client
-    client.send({
+    // Send room-welcome
+    connection.send({
       type: 'room-welcome',
       roomId: this.roomId,
-      role: client.role,
+      role: connection.role,
       seq: this.seq,
       workspace: this.getWorkspace(),
-      locks: this.getLocksMap(),
+      locks: this.getLockState(),
       presence: this.getPresenceBroadcastList(),
-      members: this.roomService.listRoomMembers(this.roomId),
-      autosaveStatus: {
-        status: this.autosaveStatus,
-        lastAutosavedAt: this.lastAutosavedAt,
-      },
-      lastRevision: this.getLastRevision(),
+      members: this.getOnlineMembersList(),
     });
 
-    // Notify room of user presence
-    this.broadcast({
-      type: 'room-notification',
-      kind: 'user-joined',
-      message: `${client.user.displayName} joined the room.`,
-      targetUserId: client.user.id,
-      timestamp: this.now().toISOString(),
-    }, client.connectionId);
+    // Broadcast member joined
+    this.broadcast(
+      {
+        type: 'room-notification',
+        kind: 'user-joined',
+        message: `${connection.user.displayName} connected.`,
+        targetUserId: connection.user.id,
+        newRole: connection.role,
+        timestamp: this.now().toISOString(),
+      },
+      connection.connectionId,
+    );
   }
 
   removeClient(connectionId: string): void {
-    const client = this.connections.get(connectionId);
-    if (!client) {
-      return;
-    }
+    const conn = this.connections.get(connectionId);
+    if (!conn) return;
 
     this.connections.delete(connectionId);
 
-    // Release any ephemeral presence
+    // Release locks held by this user if they have no other connections
+    const hasOtherConnection = Array.from(this.connections.values()).some(
+      c => c.user.id === conn.user.id,
+    );
+    if (!hasOtherConnection) {
+      for (const [key, info] of Array.from(this.locks.entries())) {
+        if (info.holder.userId === conn.user.id) {
+          this.locks.delete(key);
+          this.broadcast({
+            type: 'locks-changed',
+            key,
+            holder: null,
+          });
+        }
+      }
+    }
+
     this.broadcast({
       type: 'presence',
       connectionId,
       user: {
-        userId: client.user.id,
-        name: client.user.displayName,
-        color: client.color,
+        userId: conn.user.id,
+        name: conn.user.displayName,
+        color: conn.color,
       },
       state: { view: null, focus: null, drafting: null },
     });
-
-    this.broadcast({
-      type: 'room-notification',
-      kind: 'user-left',
-      message: `${client.user.displayName} left the room.`,
-      targetUserId: client.user.id,
-      timestamp: this.now().toISOString(),
-    });
   }
 
-  disconnectUser(userId: string, reason = 'Disconnected by server'): void {
+  disconnectUser(userId: string, reason = 'Disconnected'): void {
     for (const client of Array.from(this.connections.values())) {
       if (client.user.id === userId) {
-        client.close(4403, reason.slice(0, 120));
+        client.close(1000, reason);
         this.removeClient(client.connectionId);
       }
     }
@@ -281,88 +236,171 @@ export class RoomRuntime {
     }
   }
 
-  // --- Stubs for v2 Op Engine & Lock Manager (R02 & R03) ---
+  updatePresence(connectionId: string, state: PresenceState): void {
+    const conn = this.connections.get(connectionId);
+    if (!conn) return;
 
-  async handleOp(connectionId: string, op: CollabOp): Promise<void> {
-    const client = this.connections.get(connectionId);
-    if (!client) return;
-    // Stubbed for R02: Full serial queue op engine
-    client.send({
-      type: 'op-ack',
-      opId: op.opId,
-      seq: this.seq,
+    conn.presence = state;
+    this.broadcast({
+      type: 'presence',
+      connectionId,
+      user: {
+        userId: conn.user.id,
+        name: conn.user.displayName,
+        color: conn.color,
+      },
+      state,
     });
   }
 
-  async handleOpsSince(connectionId: string, _seq: number): Promise<void> {
-    const client = this.connections.get(connectionId);
-    if (!client) return;
-    // Stubbed for R02: Op catchup or snapshot
-    client.send({
-      type: 'snapshot',
-      seq: this.seq,
-      workspace: this.getWorkspace(),
-    });
-  }
+  async acquireLock(
+    connectionId: string,
+    key: string,
+  ): Promise<{ ok: boolean; holder: LockHolder }> {
+    const conn = this.connections.get(connectionId);
+    if (!conn) throw new CollabServiceError('UNAUTHORIZED', 'Not connected to room');
 
-  handleLockAcquire(connectionId: string, key: string): void {
-    const client = this.connections.get(connectionId);
-    if (!client) return;
-    // Stubbed for R03: Lock manager
+    const existing = this.locks.get(key);
+    const nowMs = this.now().getTime();
+
+    if (existing && existing.holder.userId !== conn.user.id && existing.expiresAt > nowMs) {
+      return { ok: false, holder: existing.holder };
+    }
+
     const holder: LockHolder = {
-      userId: client.user.id,
-      name: client.user.displayName,
-      color: client.color,
+      userId: conn.user.id,
+      name: conn.user.displayName,
+      color: conn.color,
     };
-    this.locks.set(key, holder);
-    client.send({
-      type: 'lock-granted',
-      key,
-      expiresAt: Date.now() + 30000,
-    });
+
+    this.locks.set(key, { holder, expiresAt: nowMs + 30000 });
     this.broadcast({
       type: 'locks-changed',
       key,
       holder,
     });
+
+    return { ok: true, holder };
   }
 
-  handleLockRelease(connectionId: string, key: string): void {
+  async releaseLock(connectionId: string, key: string): Promise<boolean> {
+    const conn = this.connections.get(connectionId);
+    if (!conn) return false;
+
+    const existing = this.locks.get(key);
+    if (!existing || existing.holder.userId !== conn.user.id) {
+      return false;
+    }
+
     this.locks.delete(key);
     this.broadcast({
       type: 'locks-changed',
       key,
       holder: null,
     });
+    return true;
   }
 
-  handleLockHeartbeat(connectionId: string, key: string): void {
-    const client = this.connections.get(connectionId);
-    if (!client) return;
-    client.send({
-      type: 'lock-granted',
+  async heartbeatLock(connectionId: string, key: string): Promise<boolean> {
+    const conn = this.connections.get(connectionId);
+    if (!conn) return false;
+
+    const existing = this.locks.get(key);
+    if (!existing || existing.holder.userId !== conn.user.id) {
+      return false;
+    }
+
+    existing.expiresAt = this.now().getTime() + 30000;
+    return true;
+  }
+
+  async forceReleaseLock(key: string): Promise<boolean> {
+    if (!this.locks.has(key)) return false;
+    this.locks.delete(key);
+    this.broadcast({
+      type: 'locks-changed',
       key,
-      expiresAt: Date.now() + 30000,
+      holder: null,
+    });
+    return true;
+  }
+
+  async handleOp(connectionId: string, op: CollabOp): Promise<void> {
+    await this.applyOp(connectionId, op);
+  }
+
+  async handleOpsSince(connectionId: string, seq: number): Promise<void> {
+    const conn = this.connections.get(connectionId);
+    if (!conn) return;
+    const rows = await this.store.ops.listSince(this.roomId, seq);
+    conn.send({
+      type: 'ops-since-reply',
+      sinceSeq: seq,
+      ops: rows.map(r => ({
+        seq: r.seq,
+        op: {
+          opId: r.op_id,
+          kind: r.kind as any,
+          payload: r.payload as any,
+        },
+        result: r.result,
+      })),
     });
   }
 
-  handleLockForceRelease(connectionId: string, key: string): void {
-    this.handleLockRelease(connectionId, key);
+  async handleLockAcquire(connectionId: string, key: string): Promise<void> {
+    await this.acquireLock(connectionId, key);
+  }
+
+  async handleLockRelease(connectionId: string, key: string): Promise<void> {
+    await this.releaseLock(connectionId, key);
+  }
+
+  async handleLockHeartbeat(connectionId: string, key: string): Promise<void> {
+    await this.heartbeatLock(connectionId, key);
+  }
+
+  async handleLockForceRelease(connectionId: string, key: string): Promise<void> {
+    await this.forceReleaseLock(key);
   }
 
   handlePresenceUpdate(connectionId: string, state: PresenceState): void {
-    const client = this.connections.get(connectionId);
-    if (!client) return;
-    client.presence = state;
-    this.broadcast({
-      type: 'presence',
-      connectionId,
-      user: {
-        userId: client.user.id,
-        name: client.user.displayName,
-        color: client.color,
-      },
-      state,
+    this.updatePresence(connectionId, state);
+  }
+
+  async applyOp(
+    connectionId: string,
+    op: CollabOp,
+  ): Promise<{ seq: number; result?: unknown }> {
+    const conn = this.connections.get(connectionId);
+    if (!conn) throw new CollabServiceError('UNAUTHORIZED', 'Not connected');
+
+    return this.enqueueMutation(async () => {
+      this.seq += 1;
+      const currentSeq = this.seq;
+
+      // Persistence in store
+      await this.store.ops.append({
+        roomId: this.roomId,
+        seq: currentSeq,
+        opId: op.opId,
+        userId: conn.user.id,
+        kind: op.kind,
+        payload: op.payload,
+        result: {},
+        createdAt: this.now().toISOString(),
+      });
+
+      this.scheduleAutosave();
+
+      this.broadcast({
+        type: 'op-applied',
+        seq: currentSeq,
+        op,
+        result: {},
+      });
+
+      return { seq: currentSeq, result: {} };
     });
   }
 
@@ -373,7 +411,7 @@ export class RoomRuntime {
         this.broadcast({
           type: 'room-notification',
           kind: 'role-changed',
-          message: `Member role was changed to ${event.newRole}.`,
+          message: `Your room role was updated to ${event.newRole}.`,
           targetUserId: event.userId,
           newRole: event.newRole,
           timestamp: this.now().toISOString(),
@@ -384,7 +422,7 @@ export class RoomRuntime {
       case 'member-kicked': {
         for (const client of Array.from(this.connections.values())) {
           if (client.user.id === event.userId) {
-            client.send({ type: 'kicked', reason: event.reason || 'You were removed from the room.' });
+            client.send({ type: 'kicked', reason: event.reason || 'You were kicked from the room.' });
             client.close(4403, 'Kicked from room');
             this.removeClient(client.connectionId);
           }
@@ -503,16 +541,19 @@ export class RoomRuntime {
 
     return this.enqueueMutation(async () => {
       if (this.disposed || !this.initialized) return;
-      const workspaceDir = this.roomService.getRoomWorkspaceDir(this.roomId);
-      await saveWorkspace(workspaceDir, this.workspace);
-      const index = WorkspaceIndex.rebuild(workspaceDir, this.workspace);
-      index.close();
-
       const autosavedAt = this.now().toISOString();
+
+      await this.store.snapshots.create({
+        roomId: this.roomId,
+        seq: this.seq,
+        workspace: this.workspace,
+        createdAt: autosavedAt,
+      });
+
       this.lastAutosavedAt = autosavedAt;
       this.autosaveStatus = 'autosaved';
 
-      this.roomService.recordAutosave(this.roomId, autosavedAt);
+      await this.roomService.recordAutosave(this.roomId, autosavedAt);
 
       this.broadcast({
         type: 'autosave-status',
@@ -554,7 +595,7 @@ export class RoomRuntimeManager {
   private readonly loadingPromises = new Map<string, Promise<RoomRuntime>>();
 
   constructor(
-    private readonly serverDb: ServerDatabase,
+    private readonly store: ServerStore,
     private readonly roomService: RoomService,
     private readonly options: RoomRuntimeOptions = {},
   ) {
@@ -590,7 +631,7 @@ export class RoomRuntimeManager {
       return inflight;
     }
 
-    const promise = RoomRuntime.create(roomId, this.serverDb, this.roomService, this.options)
+    const promise = RoomRuntime.create(roomId, this.store, this.roomService, this.options)
       .then(runtime => {
         this.loadingPromises.delete(roomId);
         this.runtimes.set(roomId, runtime);

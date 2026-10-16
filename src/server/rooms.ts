@@ -1,11 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
-import os from 'node:os';
-import path from 'node:path';
 import { exportWorkspace } from '../main/services/exportService.js';
 import { validateWorkspace } from '../main/services/validation.js';
 import { createWorkspace } from '../main/services/workspaceFactory.js';
-import { loadWorkspace, saveWorkspace } from '../main/services/workspaceService.js';
 import { canRoomAction, canServerAction, hasMinimumRoomRole } from '../shared/collab/permissions.js';
 import {
   adminResolveRoomRequestSchema,
@@ -42,16 +38,18 @@ import {
   type UserProfile,
 } from '../shared/collab/types.js';
 import type { Workspace } from '../shared/types/workspace.js';
+import { CollabServiceError } from './errors.js';
 import {
-  CollabServiceError,
+  mapAuditLogRow,
+  mapServerSettingsRow,
   type InviteRow,
   type JoinRequestRow,
   type RoomBanRow,
   type RoomMemberRow,
   type RoomRow,
-  type ServerDatabase,
+  type ServerStore,
   type UserRow,
-} from './db.js';
+} from './store/index.js';
 
 export type RoomLifecycleEvent =
   | { type: 'room-created'; roomId: string; actorId: string }
@@ -72,7 +70,6 @@ export type RoomLifecycleEvent =
     };
 
 export interface RoomServiceOptions {
-  roomsDir?: string;
   now?: () => Date;
   getOnlineUserIds?: (roomId: string) => ReadonlySet<string> | string[];
   getWorkspaceProvider?: (roomId: string) => Workspace | null | undefined;
@@ -100,32 +97,19 @@ function generateInviteCodeString(): string {
 }
 
 export class RoomService {
-  readonly roomsDir: string;
-  private readonly ownsTempRoomsDir: boolean;
   private readonly now: () => Date;
   private getOnlineUserIds?: (roomId: string) => ReadonlySet<string> | string[];
   private getWorkspaceProvider?: (roomId: string) => Workspace | null | undefined;
   private onRoomEvent?: (event: RoomLifecycleEvent) => void;
 
   constructor(
-    private readonly serverDb: ServerDatabase,
+    private readonly store: ServerStore,
     options: RoomServiceOptions = {},
   ) {
     this.now = options.now ?? (() => new Date());
     this.getOnlineUserIds = options.getOnlineUserIds;
     this.getWorkspaceProvider = options.getWorkspaceProvider;
     this.onRoomEvent = options.onRoomEvent;
-
-    if (options.roomsDir) {
-      this.roomsDir = path.resolve(options.roomsDir);
-      this.ownsTempRoomsDir = false;
-    } else if (serverDb.dataDir === ':memory:') {
-      this.roomsDir = mkdtempSync(path.join(os.tmpdir(), 'hlr-rooms-mem-'));
-      this.ownsTempRoomsDir = true;
-    } else {
-      this.roomsDir = path.join(serverDb.dataDir, 'rooms');
-      this.ownsTempRoomsDir = false;
-    }
   }
 
   setRuntimeHooks(hooks: {
@@ -144,48 +128,41 @@ export class RoomService {
     }
   }
 
-  cleanupTempDir(): void {
-    if (this.ownsTempRoomsDir) {
-      rmSync(this.roomsDir, { recursive: true, force: true });
-    }
-  }
-
-  getRoomDir(roomId: string): string {
-    return path.join(this.roomsDir, roomId);
-  }
-
-  getRoomWorkspaceDir(roomId: string): string {
-    return path.join(this.getRoomDir(roomId), 'workspace');
-  }
-
-  getRoomRevisionsDir(roomId: string): string {
-    return path.join(this.getRoomDir(roomId), 'revisions');
-  }
-
   async loadRoomWorkspace(roomId: string): Promise<Workspace> {
-    this.requireRoomRow(roomId);
+    await this.requireRoomRow(roomId);
     const live = this.getWorkspaceProvider?.(roomId);
     if (live) {
-      return live;
+      return structuredClone(live);
     }
-    return loadWorkspace(this.getRoomWorkspaceDir(roomId));
+    const snapshot = await this.store.snapshots.getLatest(roomId);
+    if (!snapshot) {
+      throw new CollabServiceError('NOT_FOUND', `No workspace snapshot found for room '${roomId}'.`);
+    }
+    return structuredClone(snapshot.workspace);
   }
 
-  async saveRoomWorkspace(roomId: string, workspace: Workspace): Promise<void> {
-    this.requireRoomRow(roomId);
-    await saveWorkspace(this.getRoomWorkspaceDir(roomId), workspace);
+  async saveRoomWorkspace(roomId: string, workspace: Workspace, seq = 0): Promise<void> {
+    await this.requireRoomRow(roomId);
+    await this.store.snapshots.create({
+      roomId,
+      seq,
+      workspace,
+      createdAt: this.now().toISOString(),
+    });
   }
 
-  recordAutosave(roomId: string, autosavedAt?: string): string {
+  async recordAutosave(roomId: string, autosavedAt?: string): Promise<string> {
     const timestamp = autosavedAt ?? this.now().toISOString();
-    this.serverDb.db
-      .prepare('UPDATE rooms SET last_autosaved_at = ?, updated_at = ? WHERE id = ?')
-      .run(timestamp, timestamp, roomId);
+    await this.store.rooms.update(roomId, {
+      lastAutosavedAt: timestamp,
+      updatedAt: timestamp,
+    });
     return timestamp;
   }
 
   async createRoom(actor: UserProfile, input: unknown): Promise<RoomSummary> {
-    const settings = this.serverDb.getSettings();
+    const settingsRow = await this.store.serverSettings.get();
+    const settings = settingsRow ? mapServerSettingsRow(settingsRow) : { roomCreationMode: 'all_users' as const };
     if (
       !canServerAction(actor.serverRole, 'rooms:create', {
         roomCreationMode: settings.roomCreationMode,
@@ -222,88 +199,70 @@ export class RoomService {
     }
 
     const roomId = `room_${randomUUID()}`;
-    const workspaceDir = this.getRoomWorkspaceDir(roomId);
-    await saveWorkspace(workspaceDir, workspace);
+    const nowIso = this.now().toISOString();
 
-    try {
-      const nowIso = this.now().toISOString();
-      this.serverDb.transaction(() => {
-        this.serverDb.db
-          .prepare(
-            `INSERT INTO rooms (
-              id, name, visibility, owner_id, project_id, project_name, last_autosaved_at, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-          )
-          .run(
-            roomId,
-            parsed.data.name,
-            parsed.data.visibility,
-            actor.id,
-            workspace.config.projectId,
-            workspace.config.projectName,
-            nowIso,
-            nowIso,
-            nowIso,
-          );
-
-        this.serverDb.db
-          .prepare(
-            `INSERT INTO room_members (room_id, user_id, role, joined_at)
-             VALUES (?, ?, 'ROOM_OWNER', ?)`,
-          )
-          .run(roomId, actor.id, nowIso);
-
-        this.serverDb.appendAuditLog({
-          roomId,
-          actorId: actor.id,
-          actorName: actor.displayName,
-          action: 'rooms:create',
-          targetId: roomId,
-          details: {
-            name: parsed.data.name,
-            visibility: parsed.data.visibility,
-            projectId: workspace.config.projectId,
-            projectName: workspace.config.projectName,
-            imported: Boolean(parsed.data.workspace),
-          },
-          createdAt: nowIso,
-        });
+    await this.store.transaction(async tx => {
+      await tx.rooms.create({
+        id: roomId,
+        name: parsed.data.name,
+        visibility: parsed.data.visibility,
+        ownerId: actor.id,
+        projectId: workspace.config.projectId,
+        projectName: workspace.config.projectName,
+        headSeq: 0,
+        snapshotSeq: 0,
+        lastAutosavedAt: nowIso,
+        createdAt: nowIso,
+        updatedAt: nowIso,
       });
-    } catch (error) {
-      rmSync(this.getRoomDir(roomId), { recursive: true, force: true });
-      throw error;
-    }
+
+      await tx.snapshots.create({
+        roomId,
+        seq: 0,
+        workspace,
+        createdAt: nowIso,
+      });
+
+      await tx.memberships.add({
+        roomId,
+        userId: actor.id,
+        role: 'ROOM_OWNER',
+        joinedAt: nowIso,
+      });
+
+      await tx.audit.append({
+        roomId,
+        actorId: actor.id,
+        actorName: actor.displayName,
+        action: 'rooms:create',
+        targetId: roomId,
+        details: {
+          name: parsed.data.name,
+          visibility: parsed.data.visibility,
+          projectId: workspace.config.projectId,
+          projectName: workspace.config.projectName,
+          imported: Boolean(parsed.data.workspace),
+        },
+        createdAt: nowIso,
+      });
+    });
 
     this.emitEvent({ type: 'room-created', roomId, actorId: actor.id });
     return this.getRoomSummary(roomId, actor.id);
   }
 
-  listRoomsForUser(actor: UserProfile): ListRoomsForUserResult {
-    const memberRows = this.serverDb.db
-      .prepare(
-        `SELECT r.*
-         FROM rooms r
-         INNER JOIN room_members rm ON rm.room_id = r.id
-         WHERE rm.user_id = ?
-         ORDER BY r.updated_at DESC, r.created_at DESC`,
-      )
-      .all(actor.id) as RoomRow[];
+  async listRoomsForUser(actor: UserProfile): Promise<ListRoomsForUserResult> {
+    const memberRows = await this.store.rooms.listForUser(actor.id);
+    const myRooms = await Promise.all(
+      memberRows.map(row => this.mapRoomRowToSummary(row, actor.id)),
+    );
 
-    const myRooms = memberRows.map(row => this.mapRoomRowToSummary(row, actor.id));
-
-    const listedRows = this.serverDb.db
-      .prepare(
-        `SELECT *
-         FROM rooms
-         WHERE visibility = 'listed'
-         ORDER BY updated_at DESC, created_at DESC`,
-      )
-      .all() as RoomRow[];
-
+    const listedRows = await this.store.rooms.list({ visibility: 'listed' });
     const listedRooms: ListedRoomSummary[] = [];
+
     for (const row of listedRows) {
-      const myRole = this.getMemberRole(row.id, actor.id);
-      const isBanned = this.isUserBanned(row.id, actor.id);
+      const myRole = await this.getMemberRole(row.id, actor.id);
+      const isBanned = await this.isUserBanned(row.id, actor.id);
       if (
         !canRoomAction(myRole, 'room:view-listed', {
           visibility: row.visibility,
@@ -314,14 +273,9 @@ export class RoomService {
         continue;
       }
 
-      const ownerRow = this.findUserRow(row.owner_id);
-      const memberCount = this.getRoomMemberCount(row.id);
-      const pendingReq = this.serverDb.db
-        .prepare(
-          `SELECT 1 FROM join_requests
-           WHERE room_id = ? AND user_id = ? AND status = 'PENDING'`,
-        )
-        .get(row.id, actor.id);
+      const ownerRow = await this.findUserRow(row.owner_id);
+      const memberCount = await this.getRoomMemberCount(row.id);
+      const pendingReq = await this.store.joinRequests.getPendingByRoomAndUser(row.id, actor.id);
 
       listedRooms.push({
         id: row.id,
@@ -338,29 +292,21 @@ export class RoomService {
       });
     }
 
-    const inviteRows = this.serverDb.db
-      .prepare(
-        `SELECT *
-         FROM invites
-         WHERE target_user_id = ? AND kind = 'direct' AND status = 'PENDING'
-         ORDER BY created_at DESC`,
-      )
-      .all(actor.id) as InviteRow[];
+    const inviteRows = await this.store.invites.listPendingForUser(actor.id);
+    const nonBannedInvites: InviteRow[] = [];
+    for (const inv of inviteRows) {
+      if (!(await this.isUserBanned(inv.room_id, actor.id))) {
+        nonBannedInvites.push(inv);
+      }
+    }
+    const myInvites = await Promise.all(
+      nonBannedInvites.map(inv => this.mapDirectInviteRow(inv)),
+    );
 
-    const myInvites = inviteRows
-      .filter(inv => !this.isUserBanned(inv.room_id, actor.id))
-      .map(inv => this.mapDirectInviteRow(inv));
-
-    const joinReqRows = this.serverDb.db
-      .prepare(
-        `SELECT *
-         FROM join_requests
-         WHERE user_id = ?
-         ORDER BY created_at DESC`,
-      )
-      .all(actor.id) as JoinRequestRow[];
-
-    const myJoinRequests = joinReqRows.map(req => this.mapJoinRequestRow(req));
+    const joinReqRows = await this.store.joinRequests.listByUser(actor.id);
+    const myJoinRequests = await Promise.all(
+      joinReqRows.map(req => this.mapJoinRequestRow(req)),
+    );
 
     return {
       myRooms,
@@ -371,9 +317,9 @@ export class RoomService {
   }
 
   async getRoom(actor: UserProfile, roomId: string): Promise<GetRoomDetailResult> {
-    const roomRow = this.requireRoomRow(roomId);
-    const myRole = this.getMemberRole(roomId, actor.id);
-    const isBanned = this.isUserBanned(roomId, actor.id);
+    const roomRow = await this.requireRoomRow(roomId);
+    const myRole = await this.getMemberRole(roomId, actor.id);
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     const isServerAdmin =
       actor.serverRole === 'SERVER_ADMIN' || actor.serverRole === 'SERVER_OWNER';
 
@@ -385,12 +331,12 @@ export class RoomService {
       throw new CollabServiceError('FORBIDDEN', 'You are not a member of this room.');
     }
 
-    const room = this.mapRoomRowToSummary(roomRow, actor.id);
-    const members = this.listRoomMembers(roomId);
+    const room = await this.mapRoomRowToSummary(roomRow, actor.id);
+    const members = await this.listRoomMembers(roomId);
     const canViewAdminLists = hasMinimumRoomRole(myRole, 'ROOM_ADMIN') || isServerAdmin;
-    const invites = canViewAdminLists ? this.listRoomInvites(roomId) : [];
-    const joinRequests = canViewAdminLists ? this.listRoomJoinRequests(roomId) : [];
-    const bans = canViewAdminLists ? this.listRoomBans(roomId) : [];
+    const invites = canViewAdminLists ? await this.listRoomInvites(roomId) : [];
+    const joinRequests = canViewAdminLists ? await this.listRoomJoinRequests(roomId) : [];
+    const bans = canViewAdminLists ? await this.listRoomBans(roomId) : [];
     const workspace = await this.loadRoomWorkspace(roomId);
 
     return {
@@ -403,12 +349,13 @@ export class RoomService {
     };
   }
 
-  updateRoom(actor: UserProfile, roomId: string, input: unknown): RoomSummary {
-    const roomRow = this.requireRoomRow(roomId);
-    const actorRole = this.getMemberRole(roomId, actor.id);
+  async updateRoom(actor: UserProfile, roomId: string, input: unknown): Promise<RoomSummary> {
+    const roomRow = await this.requireRoomRow(roomId);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'room:edit-metadata', {
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError('FORBIDDEN', 'Only room admins can update room metadata.');
@@ -426,12 +373,14 @@ export class RoomService {
     const nextVisibility = parsed.data.visibility ?? roomRow.visibility;
     const nowIso = this.now().toISOString();
 
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare('UPDATE rooms SET name = ?, visibility = ?, updated_at = ? WHERE id = ?')
-        .run(nextName, nextVisibility, nowIso, roomId);
+    await this.store.transaction(async tx => {
+      await tx.rooms.update(roomId, {
+        name: nextName,
+        visibility: nextVisibility,
+        updatedAt: nowIso,
+      });
 
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -451,13 +400,14 @@ export class RoomService {
     return this.getRoomSummary(roomId, actor.id);
   }
 
-  deleteRoom(actor: UserProfile, roomId: string): { deleted: true } {
-    const roomRow = this.requireRoomRow(roomId);
-    const actorRole = this.getMemberRole(roomId, actor.id);
+  async deleteRoom(actor: UserProfile, roomId: string): Promise<{ deleted: true }> {
+    const roomRow = await this.requireRoomRow(roomId);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'room:delete', {
         actorServerRole: actor.serverRole,
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError(
@@ -469,9 +419,8 @@ export class RoomService {
     const nowIso = this.now().toISOString();
     const auditAction = actorRole === 'ROOM_OWNER' ? 'room:delete' : 'rooms:force-delete';
 
-    this.serverDb.transaction(() => {
-      this.serverDb.db.prepare('DELETE FROM rooms WHERE id = ?').run(roomId);
-      this.serverDb.appendAuditLog({
+    await this.store.transaction(async tx => {
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -484,9 +433,9 @@ export class RoomService {
         },
         createdAt: nowIso,
       });
+      await tx.rooms.delete(roomId);
     });
 
-    rmSync(this.getRoomDir(roomId), { recursive: true, force: true });
     this.emitEvent({
       type: 'room-deleted',
       roomId,
@@ -497,9 +446,9 @@ export class RoomService {
     return { deleted: true };
   }
 
-  leaveRoom(actor: UserProfile, roomId: string): { left: true } {
-    this.requireRoomRow(roomId);
-    const actorRole = this.getMemberRole(roomId, actor.id);
+  async leaveRoom(actor: UserProfile, roomId: string): Promise<{ left: true }> {
+    await this.requireRoomRow(roomId);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
     if (actorRole === null) {
       throw new CollabServiceError('FORBIDDEN', 'You are not a member of this room.');
     }
@@ -511,25 +460,20 @@ export class RoomService {
       );
     }
 
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'room:leave', {
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError('FORBIDDEN', 'Not permitted to leave this room.');
     }
 
     const nowIso = this.now().toISOString();
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare('DELETE FROM room_members WHERE room_id = ? AND user_id = ?')
-        .run(roomId, actor.id);
-
-      this.serverDb.db
-        .prepare('UPDATE rooms SET updated_at = ? WHERE id = ?')
-        .run(nowIso, roomId);
-
-      this.serverDb.appendAuditLog({
+    await this.store.transaction(async tx => {
+      await tx.memberships.remove(roomId, actor.id);
+      await tx.rooms.update(roomId, { updatedAt: nowIso });
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -544,12 +488,13 @@ export class RoomService {
     return { left: true };
   }
 
-  transferOwnership(actor: UserProfile, roomId: string, input: unknown): RoomSummary {
-    this.requireRoomRow(roomId);
-    const actorRole = this.getMemberRole(roomId, actor.id);
+  async transferOwnership(actor: UserProfile, roomId: string, input: unknown): Promise<RoomSummary> {
+    await this.requireRoomRow(roomId);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'room:transfer-ownership', {
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError('FORBIDDEN', 'Only the room owner can transfer ownership.');
@@ -569,12 +514,12 @@ export class RoomService {
       throw new CollabServiceError('BAD_REQUEST', 'You are already the owner of this room.');
     }
 
-    const targetUser = this.findUserRow(newOwnerId);
+    const targetUser = await this.findUserRow(newOwnerId);
     if (!targetUser) {
       throw new CollabServiceError('NOT_FOUND', `User '${newOwnerId}' not found.`);
     }
 
-    const targetMemberRole = this.getMemberRole(roomId, newOwnerId);
+    const targetMemberRole = await this.getMemberRole(roomId, newOwnerId);
     if (targetMemberRole === null) {
       throw new CollabServiceError(
         'BAD_REQUEST',
@@ -583,20 +528,11 @@ export class RoomService {
     }
 
     const nowIso = this.now().toISOString();
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare("UPDATE room_members SET role = 'ROOM_ADMIN' WHERE room_id = ? AND user_id = ?")
-        .run(roomId, actor.id);
-
-      this.serverDb.db
-        .prepare("UPDATE room_members SET role = 'ROOM_OWNER' WHERE room_id = ? AND user_id = ?")
-        .run(roomId, newOwnerId);
-
-      this.serverDb.db
-        .prepare('UPDATE rooms SET owner_id = ?, updated_at = ? WHERE id = ?')
-        .run(newOwnerId, nowIso, roomId);
-
-      this.serverDb.appendAuditLog({
+    await this.store.transaction(async tx => {
+      await tx.memberships.updateRole(roomId, actor.id, 'ROOM_ADMIN');
+      await tx.memberships.updateRole(roomId, newOwnerId, 'ROOM_OWNER');
+      await tx.rooms.update(roomId, { ownerId: newOwnerId, updatedAt: nowIso });
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -621,8 +557,8 @@ export class RoomService {
     return this.getRoomSummary(roomId, actor.id);
   }
 
-  createDirectInvite(actor: UserProfile, roomId: string, input: unknown): DirectInviteSummary {
-    this.requireRoomRow(roomId);
+  async createDirectInvite(actor: UserProfile, roomId: string, input: unknown): Promise<DirectInviteSummary> {
+    await this.requireRoomRow(roomId);
     const parsed = createDirectInviteRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -631,11 +567,12 @@ export class RoomService {
       );
     }
 
-    const actorRole = this.getMemberRole(roomId, actor.id);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'member:invite-user', {
         assignedRole: parsed.data.role,
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError(
@@ -644,7 +581,7 @@ export class RoomService {
       );
     }
 
-    const targetUser = this.findUserRow(parsed.data.targetUserId);
+    const targetUser = await this.findUserRow(parsed.data.targetUserId);
     if (!targetUser) {
       throw new CollabServiceError('NOT_FOUND', `User '${parsed.data.targetUserId}' not found.`);
     }
@@ -652,25 +589,19 @@ export class RoomService {
       throw new CollabServiceError('BAD_REQUEST', 'Target user account is not active.');
     }
 
-    if (this.isUserBanned(roomId, targetUser.id)) {
+    if (await this.isUserBanned(roomId, targetUser.id)) {
       throw new CollabServiceError(
         'CONFLICT',
         'Target user is banned from this room. Unban them before sending an invite.',
       );
     }
 
-    if (this.getMemberRole(roomId, targetUser.id) !== null) {
+    if ((await this.getMemberRole(roomId, targetUser.id)) !== null) {
       throw new CollabServiceError('CONFLICT', 'User is already a member of this room.');
     }
 
-    const existingPending = this.serverDb.db
-      .prepare(
-        `SELECT id FROM invites
-         WHERE room_id = ? AND target_user_id = ? AND kind = 'direct' AND status = 'PENDING'`,
-      )
-      .get(roomId, targetUser.id) as { id: string } | undefined;
-
-    if (existingPending) {
+    const pendingInvites = await this.store.invites.listPendingForUser(targetUser.id);
+    if (pendingInvites.some(i => i.room_id === roomId)) {
       throw new CollabServiceError(
         'CONFLICT',
         'A pending direct invite already exists for this user.',
@@ -680,16 +611,21 @@ export class RoomService {
     const inviteId = `inv_${randomUUID()}`;
     const nowIso = this.now().toISOString();
 
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare(
-          `INSERT INTO invites (
-            id, room_id, kind, target_user_id, code, role, created_by, status, uses, max_uses, expires_at, created_at
-          ) VALUES (?, ?, 'direct', ?, NULL, ?, ?, 'PENDING', 0, 1, NULL, ?)`,
-        )
-        .run(inviteId, roomId, targetUser.id, parsed.data.role, actor.id, nowIso);
+    await this.store.transaction(async tx => {
+      await tx.invites.create({
+        id: inviteId,
+        roomId,
+        kind: 'direct',
+        targetUserId: targetUser.id,
+        role: parsed.data.role,
+        createdBy: actor.id,
+        status: 'PENDING',
+        uses: 0,
+        maxUses: 1,
+        createdAt: nowIso,
+      });
 
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -707,11 +643,11 @@ export class RoomService {
     return this.requireDirectInviteSummary(inviteId);
   }
 
-  respondToInvite(
+  async respondToInvite(
     actor: UserProfile,
     inviteId: string,
     input: unknown,
-  ): { accepted: boolean; roomId?: string; role?: RoomRole } {
+  ): Promise<{ accepted: boolean; roomId?: string; role?: RoomRole }> {
     const payload = typeof input === 'boolean' ? { accept: input } : input;
     const parsed = respondInviteRequestSchema.safeParse(payload);
     if (!parsed.success) {
@@ -721,16 +657,13 @@ export class RoomService {
       );
     }
 
-    const inviteRow = this.serverDb.db
-      .prepare("SELECT * FROM invites WHERE id = ? AND kind = 'direct'")
-      .get(inviteId) as InviteRow | undefined;
-
-    if (!inviteRow) {
+    const inviteRow = await this.store.invites.getById(inviteId);
+    if (!inviteRow || inviteRow.kind !== 'direct') {
       throw new CollabServiceError('NOT_FOUND', `Direct invite '${inviteId}' not found.`);
     }
 
-    const isBanned = this.isUserBanned(inviteRow.room_id, actor.id);
-    const currentRole = this.getMemberRole(inviteRow.room_id, actor.id);
+    const isBanned = await this.isUserBanned(inviteRow.room_id, actor.id);
+    const currentRole = await this.getMemberRole(inviteRow.room_id, actor.id);
 
     if (inviteRow.target_user_id !== actor.id) {
       throw new CollabServiceError('FORBIDDEN', 'This invite belongs to another user.');
@@ -762,12 +695,9 @@ export class RoomService {
 
     const nowIso = this.now().toISOString();
     if (!parsed.data.accept) {
-      this.serverDb.transaction(() => {
-        this.serverDb.db
-          .prepare("UPDATE invites SET status = 'DECLINED' WHERE id = ?")
-          .run(inviteId);
-
-        this.serverDb.appendAuditLog({
+      await this.store.transaction(async tx => {
+        await tx.invites.updateStatus(inviteId, 'DECLINED');
+        await tx.audit.append({
           roomId: inviteRow.room_id,
           actorId: actor.id,
           actorName: actor.displayName,
@@ -780,31 +710,30 @@ export class RoomService {
       return { accepted: false };
     }
 
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare("UPDATE invites SET status = 'ACCEPTED', uses = uses + 1 WHERE id = ?")
-        .run(inviteId);
+    await this.store.transaction(async tx => {
+      await tx.invites.updateStatus(inviteId, 'ACCEPTED');
+      await tx.invites.incrementUses(inviteId);
 
-      this.serverDb.db
-        .prepare(
-          `UPDATE join_requests
-           SET status = 'APPROVED', assigned_role = ?, reviewed_by = ?, reviewed_at = ?
-           WHERE room_id = ? AND user_id = ? AND status = 'PENDING'`,
-        )
-        .run(inviteRow.role, inviteRow.created_by, nowIso, inviteRow.room_id, actor.id);
+      const pendingReq = await tx.joinRequests.getPendingByRoomAndUser(inviteRow.room_id, actor.id);
+      if (pendingReq) {
+        await tx.joinRequests.update(pendingReq.id, {
+          status: 'APPROVED',
+          assignedRole: inviteRow.role,
+          reviewedBy: inviteRow.created_by,
+          reviewedAt: nowIso,
+        });
+      }
 
-      this.serverDb.db
-        .prepare(
-          `INSERT INTO room_members (room_id, user_id, role, joined_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(inviteRow.room_id, actor.id, inviteRow.role, nowIso);
+      await tx.memberships.add({
+        roomId: inviteRow.room_id,
+        userId: actor.id,
+        role: inviteRow.role,
+        joinedAt: nowIso,
+      });
 
-      this.serverDb.db
-        .prepare('UPDATE rooms SET updated_at = ? WHERE id = ?')
-        .run(nowIso, inviteRow.room_id);
+      await tx.rooms.update(inviteRow.room_id, { updatedAt: nowIso });
 
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         roomId: inviteRow.room_id,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -829,8 +758,8 @@ export class RoomService {
     };
   }
 
-  createInviteCode(actor: UserProfile, roomId: string, input: unknown): InviteCodeInfo {
-    this.requireRoomRow(roomId);
+  async createInviteCode(actor: UserProfile, roomId: string, input: unknown): Promise<InviteCodeInfo> {
+    await this.requireRoomRow(roomId);
     const parsed = createInviteCodeRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -839,11 +768,12 @@ export class RoomService {
       );
     }
 
-    const actorRole = this.getMemberRole(roomId, actor.id);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'member:create-invite-code', {
         assignedRole: parsed.data.role,
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError('FORBIDDEN', 'Only room admins can create invite codes.');
@@ -859,16 +789,22 @@ export class RoomService {
         : null;
     const maxUses = parsed.data.maxUses ?? null;
 
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare(
-          `INSERT INTO invites (
-            id, room_id, kind, target_user_id, code, role, created_by, status, uses, max_uses, expires_at, created_at
-          ) VALUES (?, ?, 'code', NULL, ?, ?, ?, 'PENDING', 0, ?, ?, ?)`,
-        )
-        .run(inviteId, roomId, code, parsed.data.role, actor.id, maxUses, expiresAt, nowIso);
+    const created = await this.store.transaction(async tx => {
+      const invite = await tx.invites.create({
+        id: inviteId,
+        roomId,
+        kind: 'code',
+        code,
+        role: parsed.data.role,
+        createdBy: actor.id,
+        status: 'PENDING',
+        uses: 0,
+        maxUses,
+        expiresAt,
+        createdAt: nowIso,
+      });
 
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -882,18 +818,17 @@ export class RoomService {
         },
         createdAt: nowIso,
       });
+
+      return invite;
     });
 
-    const created = this.serverDb.db
-      .prepare('SELECT * FROM invites WHERE id = ?')
-      .get(inviteId) as InviteRow;
     return this.mapInviteCodeRow(created);
   }
 
-  redeemInviteCode(
+  async redeemInviteCode(
     actor: UserProfile,
     input: unknown,
-  ): { room: RoomSummary; role: RoomRole } {
+  ): Promise<{ room: RoomSummary; role: RoomRole }> {
     const payload = typeof input === 'string' ? { code: input } : input;
     const parsed = redeemInviteCodeRequestSchema.safeParse(payload);
     if (!parsed.success) {
@@ -904,17 +839,15 @@ export class RoomService {
     }
 
     const code = parsed.data.code.trim();
-    const inviteRow = this.serverDb.db
-      .prepare("SELECT * FROM invites WHERE code = ? AND kind = 'code'")
-      .get(code) as InviteRow | undefined;
+    const inviteRow = await this.store.invites.getByCode(code);
 
-    if (!inviteRow) {
+    if (!inviteRow || inviteRow.kind !== 'code') {
       throw new CollabServiceError('NOT_FOUND', 'Invite code not found.');
     }
 
-    this.requireRoomRow(inviteRow.room_id);
+    await this.requireRoomRow(inviteRow.room_id);
 
-    const isBanned = this.isUserBanned(inviteRow.room_id, actor.id);
+    const isBanned = await this.isUserBanned(inviteRow.room_id, actor.id);
     if (isBanned) {
       throw new CollabServiceError('FORBIDDEN', 'You are banned from this room.');
     }
@@ -934,7 +867,7 @@ export class RoomService {
       throw new CollabServiceError('BAD_REQUEST', 'Invite code has reached its maximum uses.');
     }
 
-    const currentRole = this.getMemberRole(inviteRow.room_id, actor.id);
+    const currentRole = await this.getMemberRole(inviteRow.room_id, actor.id);
     if (currentRole !== null) {
       throw new CollabServiceError('CONFLICT', 'You are already a member of this room.');
     }
@@ -944,39 +877,39 @@ export class RoomService {
     }
 
     const nowIso = this.now().toISOString();
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare('UPDATE invites SET uses = uses + 1 WHERE id = ?')
-        .run(inviteRow.id);
+    await this.store.transaction(async tx => {
+      await tx.invites.incrementUses(inviteRow.id);
 
-      this.serverDb.db
-        .prepare(
-          `UPDATE invites
-           SET status = 'ACCEPTED', uses = uses + 1
-           WHERE room_id = ? AND target_user_id = ? AND kind = 'direct' AND status = 'PENDING'`,
-        )
-        .run(inviteRow.room_id, actor.id);
+      // Auto-accept any pending direct invite
+      const pendingDirect = (await tx.invites.listPendingForUser(actor.id)).find(
+        i => i.room_id === inviteRow.room_id,
+      );
+      if (pendingDirect) {
+        await tx.invites.updateStatus(pendingDirect.id, 'ACCEPTED');
+        await tx.invites.incrementUses(pendingDirect.id);
+      }
 
-      this.serverDb.db
-        .prepare(
-          `UPDATE join_requests
-           SET status = 'APPROVED', assigned_role = ?, reviewed_by = ?, reviewed_at = ?
-           WHERE room_id = ? AND user_id = ? AND status = 'PENDING'`,
-        )
-        .run(inviteRow.role, inviteRow.created_by, nowIso, inviteRow.room_id, actor.id);
+      // Auto-approve pending join request
+      const pendingReq = await tx.joinRequests.getPendingByRoomAndUser(inviteRow.room_id, actor.id);
+      if (pendingReq) {
+        await tx.joinRequests.update(pendingReq.id, {
+          status: 'APPROVED',
+          assignedRole: inviteRow.role,
+          reviewedBy: inviteRow.created_by,
+          reviewedAt: nowIso,
+        });
+      }
 
-      this.serverDb.db
-        .prepare(
-          `INSERT INTO room_members (room_id, user_id, role, joined_at)
-           VALUES (?, ?, ?, ?)`,
-        )
-        .run(inviteRow.room_id, actor.id, inviteRow.role, nowIso);
+      await tx.memberships.add({
+        roomId: inviteRow.room_id,
+        userId: actor.id,
+        role: inviteRow.role,
+        joinedAt: nowIso,
+      });
 
-      this.serverDb.db
-        .prepare('UPDATE rooms SET updated_at = ? WHERE id = ?')
-        .run(nowIso, inviteRow.room_id);
+      await tx.rooms.update(inviteRow.room_id, { updatedAt: nowIso });
 
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         roomId: inviteRow.room_id,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -998,38 +931,34 @@ export class RoomService {
       role: inviteRow.role,
     });
 
+    const room = await this.getRoomSummary(inviteRow.room_id, actor.id);
     return {
-      room: this.getRoomSummary(inviteRow.room_id, actor.id),
+      room,
       role: inviteRow.role,
     };
   }
 
-  revokeInvite(actor: UserProfile, roomId: string, inviteId: string): { revoked: true } {
-    this.requireRoomRow(roomId);
-    const actorRole = this.getMemberRole(roomId, actor.id);
+  async revokeInvite(actor: UserProfile, roomId: string, inviteId: string): Promise<{ revoked: true }> {
+    await this.requireRoomRow(roomId);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'member:revoke-invite', {
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError('FORBIDDEN', 'Only room admins can revoke invites.');
     }
 
-    const inviteRow = this.serverDb.db
-      .prepare('SELECT * FROM invites WHERE id = ? AND room_id = ?')
-      .get(inviteId, roomId) as InviteRow | undefined;
-
-    if (!inviteRow) {
+    const inviteRow = await this.store.invites.getById(inviteId);
+    if (!inviteRow || inviteRow.room_id !== roomId) {
       throw new CollabServiceError('NOT_FOUND', `Invite '${inviteId}' not found in this room.`);
     }
 
     const nowIso = this.now().toISOString();
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare("UPDATE invites SET status = 'REVOKED' WHERE id = ?")
-        .run(inviteId);
-
-      this.serverDb.appendAuditLog({
+    await this.store.transaction(async tx => {
+      await tx.invites.updateStatus(inviteId, 'REVOKED');
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -1043,12 +972,12 @@ export class RoomService {
     return { revoked: true };
   }
 
-  createJoinRequest(
+  async createJoinRequest(
     actor: UserProfile,
     roomId: string,
     input: unknown = {},
-  ): JoinRequestSummary {
-    const roomRow = this.requireRoomRow(roomId);
+  ): Promise<JoinRequestSummary> {
+    const roomRow = await this.requireRoomRow(roomId);
     const parsed = createJoinRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -1057,11 +986,11 @@ export class RoomService {
       );
     }
 
-    if (this.isUserBanned(roomId, actor.id)) {
+    if (await this.isUserBanned(roomId, actor.id)) {
       throw new CollabServiceError('FORBIDDEN', 'You are banned from this room.');
     }
 
-    const currentRole = this.getMemberRole(roomId, actor.id);
+    const currentRole = await this.getMemberRole(roomId, actor.id);
     if (currentRole !== null) {
       throw new CollabServiceError('CONFLICT', 'You are already a member of this room.');
     }
@@ -1078,13 +1007,7 @@ export class RoomService {
       );
     }
 
-    const existingPending = this.serverDb.db
-      .prepare(
-        `SELECT id FROM join_requests
-         WHERE room_id = ? AND user_id = ? AND status = 'PENDING'`,
-      )
-      .get(roomId, actor.id) as { id: string } | undefined;
-
+    const existingPending = await this.store.joinRequests.getPendingByRoomAndUser(roomId, actor.id);
     if (existingPending) {
       throw new CollabServiceError(
         'CONFLICT',
@@ -1096,16 +1019,17 @@ export class RoomService {
     const message = parsed.data.message?.trim() ?? '';
     const nowIso = this.now().toISOString();
 
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare(
-          `INSERT INTO join_requests (
-            id, room_id, user_id, message, status, assigned_role, reviewed_by, created_at, reviewed_at
-          ) VALUES (?, ?, ?, ?, 'PENDING', NULL, NULL, ?, NULL)`,
-        )
-        .run(requestId, roomId, actor.id, message, nowIso);
+    await this.store.transaction(async tx => {
+      await tx.joinRequests.create({
+        id: requestId,
+        roomId,
+        userId: actor.id,
+        message,
+        status: 'PENDING',
+        createdAt: nowIso,
+      });
 
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -1116,7 +1040,7 @@ export class RoomService {
       });
     });
 
-    const summary = this.requireJoinRequestSummary(requestId);
+    const summary = await this.requireJoinRequestSummary(requestId);
     this.emitEvent({
       type: 'join-request-created',
       roomId,
@@ -1125,13 +1049,13 @@ export class RoomService {
     return summary;
   }
 
-  reviewJoinRequest(
+  async reviewJoinRequest(
     actor: UserProfile,
     roomId: string,
     requestId: string,
     input: unknown,
-  ): JoinRequestSummary {
-    this.requireRoomRow(roomId);
+  ): Promise<JoinRequestSummary> {
+    await this.requireRoomRow(roomId);
     const parsed = reviewJoinRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -1140,22 +1064,20 @@ export class RoomService {
       );
     }
 
-    const actorRole = this.getMemberRole(roomId, actor.id);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
     const assignedRole: BelowAdminRoomRole = parsed.data.role ?? 'VIEWER';
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'member:review-join-request', {
         assignedRole,
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError('FORBIDDEN', 'Only room admins can review join requests.');
     }
 
-    const reqRow = this.serverDb.db
-      .prepare('SELECT * FROM join_requests WHERE id = ? AND room_id = ?')
-      .get(requestId, roomId) as JoinRequestRow | undefined;
-
-    if (!reqRow) {
+    const reqRow = await this.store.joinRequests.getById(requestId);
+    if (!reqRow || reqRow.room_id !== roomId) {
       throw new CollabServiceError(
         'NOT_FOUND',
         `Join request '${requestId}' not found in this room.`,
@@ -1169,43 +1091,40 @@ export class RoomService {
       );
     }
 
-    if (parsed.data.approve && this.isUserBanned(roomId, reqRow.user_id)) {
+    if (parsed.data.approve && (await this.isUserBanned(roomId, reqRow.user_id))) {
       throw new CollabServiceError('BAD_REQUEST', 'Cannot approve a banned user.');
     }
 
     const nowIso = this.now().toISOString();
-    this.serverDb.transaction(() => {
+    await this.store.transaction(async tx => {
       if (parsed.data.approve) {
-        this.serverDb.db
-          .prepare(
-            `UPDATE join_requests
-             SET status = 'APPROVED', assigned_role = ?, reviewed_by = ?, reviewed_at = ?
-             WHERE id = ?`,
-          )
-          .run(assignedRole, actor.id, nowIso, requestId);
+        await tx.joinRequests.update(requestId, {
+          status: 'APPROVED',
+          assignedRole,
+          reviewedBy: actor.id,
+          reviewedAt: nowIso,
+        });
 
-        this.serverDb.db
-          .prepare(
-            `UPDATE invites
-             SET status = 'ACCEPTED', uses = uses + 1
-             WHERE room_id = ? AND target_user_id = ? AND kind = 'direct' AND status = 'PENDING'`,
-          )
-          .run(roomId, reqRow.user_id);
-
-        if (this.getMemberRole(roomId, reqRow.user_id) === null) {
-          this.serverDb.db
-            .prepare(
-              `INSERT INTO room_members (room_id, user_id, role, joined_at)
-               VALUES (?, ?, ?, ?)`,
-            )
-            .run(roomId, reqRow.user_id, assignedRole, nowIso);
+        const pendingDirect = (await tx.invites.listPendingForUser(reqRow.user_id)).find(
+          i => i.room_id === roomId,
+        );
+        if (pendingDirect) {
+          await tx.invites.updateStatus(pendingDirect.id, 'ACCEPTED');
+          await tx.invites.incrementUses(pendingDirect.id);
         }
 
-        this.serverDb.db
-          .prepare('UPDATE rooms SET updated_at = ? WHERE id = ?')
-          .run(nowIso, roomId);
+        if ((await tx.memberships.get(roomId, reqRow.user_id)) === null) {
+          await tx.memberships.add({
+            roomId,
+            userId: reqRow.user_id,
+            role: assignedRole,
+            joinedAt: nowIso,
+          });
+        }
 
-        this.serverDb.appendAuditLog({
+        await tx.rooms.update(roomId, { updatedAt: nowIso });
+
+        await tx.audit.append({
           roomId,
           actorId: actor.id,
           actorName: actor.displayName,
@@ -1219,15 +1138,14 @@ export class RoomService {
           createdAt: nowIso,
         });
       } else {
-        this.serverDb.db
-          .prepare(
-            `UPDATE join_requests
-             SET status = 'REJECTED', assigned_role = NULL, reviewed_by = ?, reviewed_at = ?
-             WHERE id = ?`,
-          )
-          .run(actor.id, nowIso, requestId);
+        await tx.joinRequests.update(requestId, {
+          status: 'REJECTED',
+          assignedRole: null,
+          reviewedBy: actor.id,
+          reviewedAt: nowIso,
+        });
 
-        this.serverDb.appendAuditLog({
+        await tx.audit.append({
           roomId,
           actorId: actor.id,
           actorName: actor.displayName,
@@ -1242,7 +1160,7 @@ export class RoomService {
       }
     });
 
-    const summary = this.requireJoinRequestSummary(requestId);
+    const summary = await this.requireJoinRequestSummary(requestId);
     this.emitEvent({
       type: 'join-request-reviewed',
       roomId,
@@ -1259,13 +1177,13 @@ export class RoomService {
     return summary;
   }
 
-  changeMemberRole(
+  async changeMemberRole(
     actor: UserProfile,
     roomId: string,
     targetUserId: string,
     input: unknown,
-  ): RoomMemberInfo {
-    this.requireRoomRow(roomId);
+  ): Promise<RoomMemberInfo> {
+    await this.requireRoomRow(roomId);
     const payload = typeof input === 'string' ? { role: input } : input;
     const parsed = updateRoomMemberRoleRequestSchema.safeParse(payload);
     if (!parsed.success) {
@@ -1275,15 +1193,12 @@ export class RoomService {
       );
     }
 
-    const actorRole = this.getMemberRole(roomId, actor.id);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
     if (actorRole === null) {
       throw new CollabServiceError('FORBIDDEN', 'You are not a member of this room.');
     }
 
-    const targetMember = this.serverDb.db
-      .prepare('SELECT * FROM room_members WHERE room_id = ? AND user_id = ?')
-      .get(roomId, targetUserId) as RoomMemberRow | undefined;
-
+    const targetMember = await this.store.memberships.get(roomId, targetUserId);
     if (!targetMember) {
       throw new CollabServiceError('NOT_FOUND', 'Member not found in this room.');
     }
@@ -1294,11 +1209,12 @@ export class RoomService {
         ? 'member:promote-demote-admin'
         : 'member:change-role-below-admin';
 
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, action, {
         targetRoomRole: targetMember.role,
         assignedRole,
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError(
@@ -1308,16 +1224,10 @@ export class RoomService {
     }
 
     const nowIso = this.now().toISOString();
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare('UPDATE room_members SET role = ? WHERE room_id = ? AND user_id = ?')
-        .run(assignedRole, roomId, targetUserId);
-
-      this.serverDb.db
-        .prepare('UPDATE rooms SET updated_at = ? WHERE id = ?')
-        .run(nowIso, roomId);
-
-      this.serverDb.appendAuditLog({
+    await this.store.transaction(async tx => {
+      await tx.memberships.updateRole(roomId, targetUserId, assignedRole);
+      await tx.rooms.update(roomId, { updatedAt: nowIso });
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -1342,13 +1252,13 @@ export class RoomService {
     return this.requireRoomMemberInfo(roomId, targetUserId);
   }
 
-  kickMember(
+  async kickMember(
     actor: UserProfile,
     roomId: string,
     targetUserId: string,
     input: unknown = {},
-  ): { kicked: true } {
-    this.requireRoomRow(roomId);
+  ): Promise<{ kicked: true }> {
+    await this.requireRoomRow(roomId);
     const parsed = kickOrBanMemberRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -1361,19 +1271,17 @@ export class RoomService {
       throw new CollabServiceError('FORBIDDEN', 'You cannot kick yourself from the room.');
     }
 
-    const actorRole = this.getMemberRole(roomId, actor.id);
-    const targetMember = this.serverDb.db
-      .prepare('SELECT * FROM room_members WHERE room_id = ? AND user_id = ?')
-      .get(roomId, targetUserId) as RoomMemberRow | undefined;
-
+    const actorRole = await this.getMemberRole(roomId, actor.id);
+    const targetMember = await this.store.memberships.get(roomId, targetUserId);
     if (!targetMember) {
       throw new CollabServiceError('NOT_FOUND', 'Member not found in this room.');
     }
 
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'member:kick-ban', {
         targetRoomRole: targetMember.role,
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError(
@@ -1385,16 +1293,10 @@ export class RoomService {
     const reason = parsed.data.reason?.trim() ?? '';
     const nowIso = this.now().toISOString();
 
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare('DELETE FROM room_members WHERE room_id = ? AND user_id = ?')
-        .run(roomId, targetUserId);
-
-      this.serverDb.db
-        .prepare('UPDATE rooms SET updated_at = ? WHERE id = ?')
-        .run(nowIso, roomId);
-
-      this.serverDb.appendAuditLog({
+    await this.store.transaction(async tx => {
+      await tx.memberships.remove(roomId, targetUserId);
+      await tx.rooms.update(roomId, { updatedAt: nowIso });
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -1419,13 +1321,13 @@ export class RoomService {
     return { kicked: true };
   }
 
-  banMember(
+  async banMember(
     actor: UserProfile,
     roomId: string,
     targetUserId: string,
     input: unknown = {},
-  ): { banned: true } {
-    const roomRow = this.requireRoomRow(roomId);
+  ): Promise<{ banned: true }> {
+    const roomRow = await this.requireRoomRow(roomId);
     const parsed = kickOrBanMemberRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -1438,20 +1340,21 @@ export class RoomService {
       throw new CollabServiceError('FORBIDDEN', 'You cannot ban yourself from the room.');
     }
 
-    const targetUser = this.findUserRow(targetUserId);
+    const targetUser = await this.findUserRow(targetUserId);
     if (!targetUser) {
       throw new CollabServiceError('NOT_FOUND', `User '${targetUserId}' not found.`);
     }
 
-    const actorRole = this.getMemberRole(roomId, actor.id);
-    const existingMemberRole = this.getMemberRole(roomId, targetUserId);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
+    const existingMemberRole = await this.getMemberRole(roomId, targetUserId);
     const effectiveTargetRole: RoomRole =
       existingMemberRole ?? (roomRow.owner_id === targetUserId ? 'ROOM_OWNER' : 'VIEWER');
 
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'member:kick-ban', {
         targetRoomRole: effectiveTargetRole,
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError(
@@ -1463,39 +1366,39 @@ export class RoomService {
     const reason = parsed.data.reason?.trim() ?? '';
     const nowIso = this.now().toISOString();
 
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare('DELETE FROM room_members WHERE room_id = ? AND user_id = ?')
-        .run(roomId, targetUserId);
+    await this.store.transaction(async tx => {
+      await tx.memberships.remove(roomId, targetUserId);
 
-      this.serverDb.db
-        .prepare(
-          `UPDATE invites
-           SET status = 'REVOKED'
-           WHERE room_id = ? AND target_user_id = ? AND kind = 'direct' AND status = 'PENDING'`,
-        )
-        .run(roomId, targetUserId);
+      // Revoke any pending invites
+      const pendingInvites = await tx.invites.listByRoom(roomId);
+      for (const inv of pendingInvites) {
+        if (inv.target_user_id === targetUserId && inv.status === 'PENDING') {
+          await tx.invites.updateStatus(inv.id, 'REVOKED');
+        }
+      }
 
-      this.serverDb.db
-        .prepare(
-          `UPDATE join_requests
-           SET status = 'REJECTED', reviewed_by = ?, reviewed_at = ?
-           WHERE room_id = ? AND user_id = ? AND status = 'PENDING'`,
-        )
-        .run(actor.id, nowIso, roomId, targetUserId);
+      // Reject pending join requests
+      const pendingReq = await tx.joinRequests.getPendingByRoomAndUser(roomId, targetUserId);
+      if (pendingReq) {
+        await tx.joinRequests.update(pendingReq.id, {
+          status: 'REJECTED',
+          assignedRole: null,
+          reviewedBy: actor.id,
+          reviewedAt: nowIso,
+        });
+      }
 
-      this.serverDb.db
-        .prepare(
-          `INSERT OR REPLACE INTO room_bans (room_id, user_id, banned_by, reason, banned_at)
-           VALUES (?, ?, ?, ?, ?)`,
-        )
-        .run(roomId, targetUserId, actor.id, reason, nowIso);
+      await tx.bans.add({
+        roomId,
+        userId: targetUserId,
+        bannedBy: actor.id,
+        reason,
+        bannedAt: nowIso,
+      });
 
-      this.serverDb.db
-        .prepare('UPDATE rooms SET updated_at = ? WHERE id = ?')
-        .run(nowIso, roomId);
+      await tx.rooms.update(roomId, { updatedAt: nowIso });
 
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -1520,33 +1423,28 @@ export class RoomService {
     return { banned: true };
   }
 
-  unbanMember(actor: UserProfile, roomId: string, targetUserId: string): { unbanned: true } {
-    this.requireRoomRow(roomId);
-    const actorRole = this.getMemberRole(roomId, actor.id);
+  async unbanMember(actor: UserProfile, roomId: string, targetUserId: string): Promise<{ unbanned: true }> {
+    await this.requireRoomRow(roomId);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     if (
       !canRoomAction(actorRole, 'member:kick-ban', {
         targetRoomRole: 'VIEWER',
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       })
     ) {
       throw new CollabServiceError('FORBIDDEN', 'Only room admins can unban users.');
     }
 
-    const banRow = this.serverDb.db
-      .prepare('SELECT * FROM room_bans WHERE room_id = ? AND user_id = ?')
-      .get(roomId, targetUserId) as RoomBanRow | undefined;
-
+    const banRow = await this.store.bans.get(roomId, targetUserId);
     if (!banRow) {
       throw new CollabServiceError('NOT_FOUND', 'User is not banned from this room.');
     }
 
     const nowIso = this.now().toISOString();
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare('DELETE FROM room_bans WHERE room_id = ? AND user_id = ?')
-        .run(roomId, targetUserId);
-
-      this.serverDb.appendAuditLog({
+    await this.store.transaction(async tx => {
+      await tx.bans.remove(roomId, targetUserId);
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -1560,11 +1458,12 @@ export class RoomService {
     return { unbanned: true };
   }
 
-  listRoomAuditLog(actor: UserProfile, roomId: string, limit = 100): AuditEntry[] {
-    this.requireRoomRow(roomId);
-    const actorRole = this.getMemberRole(roomId, actor.id);
+  async listRoomAuditLog(actor: UserProfile, roomId: string, limit = 100): Promise<AuditEntry[]> {
+    await this.requireRoomRow(roomId);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
+    const isBanned = await this.isUserBanned(roomId, actor.id);
     const canViewRoom = canRoomAction(actorRole, 'room:view-audit', {
-      isBanned: this.isUserBanned(roomId, actor.id),
+      isBanned,
     });
     const canViewServer = canServerAction(actor.serverRole, 'audit:view-server');
 
@@ -1572,7 +1471,8 @@ export class RoomService {
       throw new CollabServiceError('FORBIDDEN', 'Only room admins can view the room audit log.');
     }
 
-    return this.serverDb.listAuditLog({ roomId, limit });
+    const rows = await this.store.audit.list({ roomId, limit });
+    return rows.map(mapAuditLogRow);
   }
 
   async exportRoom(
@@ -1580,14 +1480,15 @@ export class RoomService {
     roomId: string,
     query: unknown,
   ): Promise<RoomExportResult> {
-    this.requireRoomRow(roomId);
-    const actorRole = this.getMemberRole(roomId, actor.id);
+    await this.requireRoomRow(roomId);
+    const actorRole = await this.getMemberRole(roomId, actor.id);
     const isServerAdmin =
       actor.serverRole === 'SERVER_ADMIN' || actor.serverRole === 'SERVER_OWNER';
+    const isBanned = await this.isUserBanned(roomId, actor.id);
 
     if (
       !canRoomAction(actorRole, 'room:export', {
-        isBanned: this.isUserBanned(roomId, actor.id),
+        isBanned,
       }) &&
       !isServerAdmin
     ) {
@@ -1628,24 +1529,21 @@ export class RoomService {
     }
   }
 
-  listAllRoomsAdmin(actor: UserProfile): RoomSummary[] {
+  async listAllRoomsAdmin(actor: UserProfile): Promise<RoomSummary[]> {
     if (!canServerAction(actor.serverRole, 'rooms:list-all-admin')) {
       throw new CollabServiceError('FORBIDDEN', 'Only server admins can list all rooms.');
     }
 
-    const rows = this.serverDb.db
-      .prepare('SELECT * FROM rooms ORDER BY updated_at DESC, created_at DESC')
-      .all() as RoomRow[];
-
-    return rows.map(row => this.mapRoomRowToSummary(row, actor.id));
+    const rows = await this.store.rooms.listAllAdmin();
+    return Promise.all(rows.map(row => this.mapRoomRowToSummary(row, actor.id)));
   }
 
-  resolveStuckRoom(actor: UserProfile, roomId: string, input: unknown): RoomSummary {
+  async resolveStuckRoom(actor: UserProfile, roomId: string, input: unknown): Promise<RoomSummary> {
     if (!canServerAction(actor.serverRole, 'rooms:resolve-stuck')) {
       throw new CollabServiceError('FORBIDDEN', 'Only server admins can resolve stuck rooms.');
     }
 
-    const roomRow = this.requireRoomRow(roomId);
+    const roomRow = await this.requireRoomRow(roomId);
     const parsed = adminResolveRoomRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -1654,7 +1552,7 @@ export class RoomService {
       );
     }
 
-    const targetUser = this.findUserRow(parsed.data.userId);
+    const targetUser = await this.findUserRow(parsed.data.userId);
     if (!targetUser) {
       throw new CollabServiceError('NOT_FOUND', `User '${parsed.data.userId}' not found.`);
     }
@@ -1670,46 +1568,33 @@ export class RoomService {
       );
     }
 
-    const previousRole = this.getMemberRole(roomId, targetUser.id);
+    const previousRole = await this.getMemberRole(roomId, targetUser.id);
     const nowIso = this.now().toISOString();
 
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare('DELETE FROM room_bans WHERE room_id = ? AND user_id = ?')
-        .run(roomId, targetUser.id);
+    await this.store.transaction(async tx => {
+      await tx.bans.remove(roomId, targetUser.id);
 
       if (assignedRole === 'ROOM_OWNER') {
         if (roomRow.owner_id !== targetUser.id) {
-          this.serverDb.db
-            .prepare(
-              "UPDATE room_members SET role = 'ROOM_ADMIN' WHERE room_id = ? AND user_id = ?",
-            )
-            .run(roomId, roomRow.owner_id);
+          await tx.memberships.updateRole(roomId, roomRow.owner_id, 'ROOM_ADMIN');
         }
-
-        this.serverDb.db
-          .prepare('UPDATE rooms SET owner_id = ?, updated_at = ? WHERE id = ?')
-          .run(targetUser.id, nowIso, roomId);
+        await tx.rooms.update(roomId, { ownerId: targetUser.id, updatedAt: nowIso });
       } else {
-        this.serverDb.db
-          .prepare('UPDATE rooms SET updated_at = ? WHERE id = ?')
-          .run(nowIso, roomId);
+        await tx.rooms.update(roomId, { updatedAt: nowIso });
       }
 
       if (previousRole === null) {
-        this.serverDb.db
-          .prepare(
-            `INSERT INTO room_members (room_id, user_id, role, joined_at)
-             VALUES (?, ?, ?, ?)`,
-          )
-          .run(roomId, targetUser.id, assignedRole, nowIso);
+        await tx.memberships.add({
+          roomId,
+          userId: targetUser.id,
+          role: assignedRole,
+          joinedAt: nowIso,
+        });
       } else {
-        this.serverDb.db
-          .prepare('UPDATE room_members SET role = ? WHERE room_id = ? AND user_id = ?')
-          .run(assignedRole, roomId, targetUser.id);
+        await tx.memberships.updateRole(roomId, targetUser.id, assignedRole);
       }
 
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         roomId,
         actorId: actor.id,
         actorName: actor.displayName,
@@ -1751,106 +1636,74 @@ export class RoomService {
     return this.getRoomSummary(roomId, actor.id);
   }
 
-  getRoomSummary(roomId: string, viewerUserId?: string | null): RoomSummary {
-    const row = this.requireRoomRow(roomId);
+  async getRoomSummary(roomId: string, viewerUserId?: string | null): Promise<RoomSummary> {
+    const row = await this.requireRoomRow(roomId);
     return this.mapRoomRowToSummary(row, viewerUserId ?? null);
   }
 
-  getMemberRole(roomId: string, userId: string): RoomRole | null {
-    const row = this.serverDb.db
-      .prepare('SELECT role FROM room_members WHERE room_id = ? AND user_id = ?')
-      .get(roomId, userId) as { role: RoomRole } | undefined;
-    return row?.role ?? null;
+  async getMemberRole(roomId: string, userId: string): Promise<RoomRole | null> {
+    const member = await this.store.memberships.get(roomId, userId);
+    return member?.role ?? null;
   }
 
-  isUserBanned(roomId: string, userId: string): boolean {
-    const row = this.serverDb.db
-      .prepare('SELECT 1 FROM room_bans WHERE room_id = ? AND user_id = ?')
-      .get(roomId, userId);
-    return Boolean(row);
+  async isUserBanned(roomId: string, userId: string): Promise<boolean> {
+    const ban = await this.store.bans.get(roomId, userId);
+    return Boolean(ban);
   }
 
-  listRoomMembers(roomId: string): RoomMemberInfo[] {
-    this.requireRoomRow(roomId);
-    const rows = this.serverDb.db
-      .prepare(
-        `SELECT rm.room_id, rm.user_id, rm.role, rm.joined_at, u.username, u.display_name
-         FROM room_members rm
-         INNER JOIN users u ON u.id = rm.user_id
-         WHERE rm.room_id = ?
-         ORDER BY rm.joined_at ASC, u.username ASC`,
-      )
-      .all(roomId) as Array<{
-      room_id: string;
-      user_id: string;
-      role: RoomRole;
-      joined_at: string;
-      username: string;
-      display_name: string;
-    }>;
-
+  async listRoomMembers(roomId: string): Promise<RoomMemberInfo[]> {
+    await this.requireRoomRow(roomId);
+    const members = await this.store.memberships.listByRoom(roomId);
     const onlineSet = this.getOnlineSet(roomId);
-    return rows.map(row => ({
-      roomId: row.room_id,
-      userId: row.user_id,
-      username: row.username,
-      displayName: row.display_name,
-      role: row.role,
-      joinedAt: row.joined_at,
-      online: onlineSet ? onlineSet.has(row.user_id) : false,
-      color: assignUserColor(row.user_id),
-    }));
+
+    const result: RoomMemberInfo[] = [];
+    for (const m of members) {
+      const user = await this.findUserRow(m.user_id);
+      result.push({
+        roomId: m.room_id,
+        userId: m.user_id,
+        username: user?.username ?? m.user_id,
+        displayName: user?.display_name ?? m.user_id,
+        role: m.role,
+        joinedAt: m.joined_at,
+        online: onlineSet ? onlineSet.has(m.user_id) : false,
+        color: assignUserColor(m.user_id),
+      });
+    }
+    return result;
   }
 
-  listRoomInvites(roomId: string): InviteInfo[] {
-    this.requireRoomRow(roomId);
-    const rows = this.serverDb.db
-      .prepare('SELECT * FROM invites WHERE room_id = ? ORDER BY created_at DESC')
-      .all(roomId) as InviteRow[];
-
-    return rows.map(row =>
-      row.kind === 'direct' ? this.mapDirectInviteRow(row) : this.mapInviteCodeRow(row),
+  async listRoomInvites(roomId: string): Promise<InviteInfo[]> {
+    await this.requireRoomRow(roomId);
+    const rows = await this.store.invites.listByRoom(roomId);
+    return Promise.all(
+      rows.map(row => (row.kind === 'direct' ? this.mapDirectInviteRow(row) : this.mapInviteCodeRow(row))),
     );
   }
 
-  listRoomJoinRequests(roomId: string): JoinRequestSummary[] {
-    this.requireRoomRow(roomId);
-    const rows = this.serverDb.db
-      .prepare('SELECT * FROM join_requests WHERE room_id = ? ORDER BY created_at DESC')
-      .all(roomId) as JoinRequestRow[];
-
-    return rows.map(row => this.mapJoinRequestRow(row));
+  async listRoomJoinRequests(roomId: string): Promise<JoinRequestSummary[]> {
+    await this.requireRoomRow(roomId);
+    const rows = await this.store.joinRequests.listByRoom(roomId);
+    return Promise.all(rows.map(row => this.mapJoinRequestRow(row)));
   }
 
-  listRoomBans(roomId: string): RoomBanInfo[] {
-    this.requireRoomRow(roomId);
-    const rows = this.serverDb.db
-      .prepare(
-        `SELECT b.room_id, b.user_id, b.banned_by, b.reason, b.banned_at, u.username, u.display_name
-         FROM room_bans b
-         INNER JOIN users u ON u.id = b.user_id
-         WHERE b.room_id = ?
-         ORDER BY b.banned_at DESC`,
-      )
-      .all(roomId) as Array<{
-      room_id: string;
-      user_id: string;
-      banned_by: string;
-      reason: string;
-      banned_at: string;
-      username: string;
-      display_name: string;
-    }>;
-
-    return rows.map(row => ({
-      roomId: row.room_id,
-      userId: row.user_id,
-      username: row.username,
-      displayName: row.display_name,
-      bannedBy: row.banned_by,
-      reason: row.reason,
-      bannedAt: row.banned_at,
-    }));
+  async listRoomBans(roomId: string): Promise<RoomBanInfo[]> {
+    await this.requireRoomRow(roomId);
+    const rows = await this.store.bans.listByRoom(roomId);
+    const result: RoomBanInfo[] = [];
+    for (const b of rows) {
+      const u = await this.findUserRow(b.user_id);
+      result.push({
+        roomId: b.room_id,
+        userId: b.user_id,
+        username: u?.username ?? b.user_id,
+        displayName: u?.display_name ?? b.user_id,
+        bannedBy: b.banned_by,
+        reason: b.reason,
+        bannedAt: b.banned_at,
+      });
+    }
+    return result;
   }
 
   private getOnlineSet(roomId: string): Set<string> | null {
@@ -1859,17 +1712,15 @@ export class RoomService {
     return raw instanceof Set ? raw : new Set(raw);
   }
 
-  private getRoomMemberCount(roomId: string): number {
-    const row = this.serverDb.db
-      .prepare('SELECT COUNT(*) AS count FROM room_members WHERE room_id = ?')
-      .get(roomId) as { count: number };
-    return row.count;
+  private async getRoomMemberCount(roomId: string): Promise<number> {
+    const members = await this.store.memberships.listByRoom(roomId);
+    return members.length;
   }
 
-  private mapRoomRowToSummary(row: RoomRow, viewerUserId: string | null): RoomSummary {
-    const ownerRow = this.findUserRow(row.owner_id);
-    const myRole = viewerUserId ? this.getMemberRole(row.id, viewerUserId) : null;
-    const memberCount = this.getRoomMemberCount(row.id);
+  private async mapRoomRowToSummary(row: RoomRow, viewerUserId: string | null): Promise<RoomSummary> {
+    const ownerRow = await this.findUserRow(row.owner_id);
+    const myRole = viewerUserId ? await this.getMemberRole(row.id, viewerUserId) : null;
+    const memberCount = await this.getRoomMemberCount(row.id);
     const onlineSet = this.getOnlineSet(row.id);
 
     return {
@@ -1889,11 +1740,11 @@ export class RoomService {
     };
   }
 
-  private mapDirectInviteRow(row: InviteRow): DirectInviteSummary {
-    const roomRow = this.requireRoomRow(row.room_id);
+  private async mapDirectInviteRow(row: InviteRow): Promise<DirectInviteSummary> {
+    const roomRow = await this.requireRoomRow(row.room_id);
     const targetId = row.target_user_id ?? '';
-    const targetUser = this.findUserRow(targetId);
-    const creatorUser = this.findUserRow(row.created_by);
+    const targetUser = await this.findUserRow(targetId);
+    const creatorUser = await this.findUserRow(row.created_by);
 
     return {
       id: row.id,
@@ -1927,9 +1778,9 @@ export class RoomService {
     };
   }
 
-  private mapJoinRequestRow(row: JoinRequestRow): JoinRequestSummary {
-    const roomRow = this.requireRoomRow(row.room_id);
-    const userRow = this.findUserRow(row.user_id);
+  private async mapJoinRequestRow(row: JoinRequestRow): Promise<JoinRequestSummary> {
+    const roomRow = await this.requireRoomRow(row.room_id);
+    const userRow = await this.findUserRow(row.user_id);
 
     return {
       id: row.id,
@@ -1947,48 +1798,41 @@ export class RoomService {
     };
   }
 
-  private requireDirectInviteSummary(inviteId: string): DirectInviteSummary {
-    const row = this.serverDb.db
-      .prepare("SELECT * FROM invites WHERE id = ? AND kind = 'direct'")
-      .get(inviteId) as InviteRow | undefined;
-    if (!row) {
+  private async requireDirectInviteSummary(inviteId: string): Promise<DirectInviteSummary> {
+    const row = await this.store.invites.getById(inviteId);
+    if (!row || row.kind !== 'direct') {
       throw new CollabServiceError('NOT_FOUND', `Direct invite '${inviteId}' not found.`);
     }
     return this.mapDirectInviteRow(row);
   }
 
-  private requireJoinRequestSummary(requestId: string): JoinRequestSummary {
-    const row = this.serverDb.db
-      .prepare('SELECT * FROM join_requests WHERE id = ?')
-      .get(requestId) as JoinRequestRow | undefined;
+  private async requireJoinRequestSummary(requestId: string): Promise<JoinRequestSummary> {
+    const row = await this.store.joinRequests.getById(requestId);
     if (!row) {
       throw new CollabServiceError('NOT_FOUND', `Join request '${requestId}' not found.`);
     }
     return this.mapJoinRequestRow(row);
   }
 
-  private requireRoomMemberInfo(roomId: string, userId: string): RoomMemberInfo {
-    const member = this.listRoomMembers(roomId).find(m => m.userId === userId);
+  private async requireRoomMemberInfo(roomId: string, userId: string): Promise<RoomMemberInfo> {
+    const members = await this.listRoomMembers(roomId);
+    const member = members.find(m => m.userId === userId);
     if (!member) {
       throw new CollabServiceError('NOT_FOUND', 'Member not found in this room.');
     }
     return member;
   }
 
-  private requireRoomRow(roomId: string): RoomRow {
-    const row = this.serverDb.db
-      .prepare('SELECT * FROM rooms WHERE id = ?')
-      .get(roomId) as RoomRow | undefined;
+  private async requireRoomRow(roomId: string): Promise<RoomRow> {
+    const row = await this.store.rooms.getById(roomId);
     if (!row) {
       throw new CollabServiceError('NOT_FOUND', `Room '${roomId}' not found.`);
     }
     return row;
   }
 
-  private findUserRow(userId: string): UserRow | undefined {
-    return this.serverDb.db
-      .prepare('SELECT * FROM users WHERE id = ?')
-      .get(userId) as UserRow | undefined;
+  private async findUserRow(userId: string): Promise<UserRow | null> {
+    return this.store.users.getById(userId);
   }
 
   private emitEvent(event: RoomLifecycleEvent): void {

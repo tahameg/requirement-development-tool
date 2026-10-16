@@ -20,15 +20,16 @@ import type {
   UserDirectoryEntry,
   UserProfile,
 } from '../shared/collab/types.js';
+import { CollabServiceError } from './errors.js';
 import {
-  CollabServiceError,
-  type ServerDatabase,
+  mapAuditLogRow,
+  mapServerSettingsRow,
+  type ServerStore,
   type SessionRow,
   type UserRow,
-  mapServerSettingsRow,
-} from './db.js';
+} from './store/index.js';
 
-export { CollabServiceError } from './db.js';
+export { CollabServiceError } from './errors.js';
 
 const SCRYPT_KEYLEN = 64;
 const DEFAULT_SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -98,6 +99,9 @@ export interface AuthServiceOptions {
   sessionTtlMs?: number;
   initialSetupToken?: string;
   now?: () => Date;
+  serverName?: string;
+  registrationMode?: RegistrationMode;
+  roomCreationMode?: RoomCreationMode;
 }
 
 export interface AuthSessionResult {
@@ -122,88 +126,125 @@ export class AuthService {
   private readonly sessionTtlMs: number;
   private readonly now: () => Date;
   private initialSetupToken: string | null = null;
+  private initialized = false;
+  private explicitSetupToken?: string;
+  private readonly options: AuthServiceOptions;
 
   constructor(
-    private readonly serverDb: ServerDatabase,
+    private readonly store: ServerStore,
     options: AuthServiceOptions = {},
   ) {
+    this.options = options;
     this.sessionTtlMs = options.sessionTtlMs ?? DEFAULT_SESSION_TTL_MS;
     this.now = options.now ?? (() => new Date());
-    this.initializeSetupState(options.initialSetupToken);
+    this.explicitSetupToken = options.initialSetupToken;
   }
 
-  private initializeSetupState(explicitSetupToken?: string): void {
-    const userCount = this.getUserCount();
+  async initialize(explicitSetupToken?: string): Promise<void> {
+    const tokenCandidate = explicitSetupToken ?? this.explicitSetupToken;
+    const nowIso = this.now().toISOString();
+    await this.store.serverSettings.ensure({
+      serverName: this.options.serverName,
+      registrationMode: this.options.registrationMode,
+      roomCreationMode: this.options.roomCreationMode,
+      nowIso,
+    });
+
+    const settingsUpdate: {
+      serverName?: string;
+      registrationMode?: RegistrationMode;
+      roomCreationMode?: RoomCreationMode;
+      setupTokenHash?: string | null;
+      updatedAt: string;
+    } = { updatedAt: nowIso };
+
+    if (this.options.serverName !== undefined) {
+      settingsUpdate.serverName = this.options.serverName;
+    }
+    if (this.options.registrationMode !== undefined) {
+      settingsUpdate.registrationMode = this.options.registrationMode;
+    }
+    if (this.options.roomCreationMode !== undefined) {
+      settingsUpdate.roomCreationMode = this.options.roomCreationMode;
+    }
+
+    const userCount = await this.store.users.count();
     if (userCount === 0) {
-      const token = explicitSetupToken?.trim() || generateRandomToken(24);
+      const token = tokenCandidate?.trim() || generateRandomToken(24);
       const tokenHash = hashToken(token);
-      const nowIso = this.now().toISOString();
-      this.serverDb.db
-        .prepare('UPDATE server_settings SET setup_token_hash = ?, updated_at = ? WHERE id = 1')
-        .run(tokenHash, nowIso);
+      settingsUpdate.setupTokenHash = tokenHash;
       this.initialSetupToken = token;
     } else {
       this.initialSetupToken = null;
-      const settingsRow = this.serverDb.getSettingsRow();
-      if (settingsRow.setup_token_hash !== null) {
-        this.serverDb.db
-          .prepare('UPDATE server_settings SET setup_token_hash = NULL WHERE id = 1')
-          .run();
+      const settingsRow = await this.store.serverSettings.get();
+      if (settingsRow && settingsRow.setup_token_hash !== null) {
+        settingsUpdate.setupTokenHash = null;
       }
     }
+    await this.store.serverSettings.update(settingsUpdate);
+    this.initialized = true;
   }
 
-  private getUserCount(): number {
-    const row = this.serverDb.db
-      .prepare('SELECT COUNT(*) AS count FROM users')
-      .get() as { count: number };
-    return row.count;
+  private async ensureInitialized(): Promise<void> {
+    if (!this.initialized) {
+      await this.initialize();
+    }
   }
 
-  getInitialSetupToken(): string | null {
-    return this.isSetupRequired() ? this.initialSetupToken : null;
+  async getInitialSetupToken(): Promise<string | null> {
+    await this.ensureInitialized();
+    const setupRequired = await this.isSetupRequired();
+    return setupRequired ? this.initialSetupToken : null;
   }
 
-  isSetupRequired(): boolean {
-    if (this.getUserCount() > 0) {
+  async isSetupRequired(): Promise<boolean> {
+    await this.ensureInitialized();
+    const count = await this.store.users.count();
+    if (count > 0) {
       return false;
     }
-    const settings = this.serverDb.getSettingsRow();
-    return settings.setup_token_hash !== null;
+    const settings = await this.store.serverSettings.get();
+    return settings?.setup_token_hash !== null;
   }
 
-  getServerSettings(): ServerSettings {
-    return this.serverDb.getSettings();
+  async getServerSettings(): Promise<ServerSettings> {
+    await this.ensureInitialized();
+    const row = await this.store.serverSettings.get();
+    if (!row) {
+      throw new CollabServiceError('INTERNAL_ERROR', 'Server settings not found.');
+    }
+    return mapServerSettingsRow(row);
   }
 
-  getPublicInfo(
+  async getPublicInfo(
     meta: {
       version?: string;
       tls?: boolean;
       fingerprint?: string | null;
     } = {},
-  ): ServerPublicInfo {
-    const settings = this.getServerSettings();
+  ): Promise<ServerPublicInfo> {
+    const settings = await this.getServerSettings();
+    const setupRequired = await this.isSetupRequired();
     return {
       serverId: settings.serverId,
       name: settings.name,
       version: meta.version ?? '0.6.0',
       tls: meta.tls ?? true,
       fingerprint: meta.fingerprint ?? null,
-      setupRequired: this.isSetupRequired(),
+      setupRequired,
       registrationMode: settings.registrationMode,
       roomCreationMode: settings.roomCreationMode,
     };
   }
 
-  updateServerSettings(
+  async updateServerSettings(
     actor: UserProfile,
     input: {
       name?: string;
       registrationMode?: RegistrationMode;
       roomCreationMode?: RoomCreationMode;
     },
-  ): ServerSettings {
+  ): Promise<ServerSettings> {
     if (!canServerAction(actor.serverRole, 'server:update-settings')) {
       throw new CollabServiceError('FORBIDDEN', 'Only the Server Owner can update server settings.');
     }
@@ -216,22 +257,26 @@ export class AuthService {
       );
     }
 
-    const current = this.serverDb.getSettingsRow();
+    await this.ensureInitialized();
+    const current = await this.store.serverSettings.get();
+    if (!current) {
+      throw new CollabServiceError('NOT_FOUND', 'Server settings not found.');
+    }
+
     const nextName = parsed.data.name ?? current.server_name;
     const nextRegMode = parsed.data.registrationMode ?? current.registration_mode;
     const nextRoomMode = parsed.data.roomCreationMode ?? current.room_creation_mode;
     const nowIso = this.now().toISOString();
 
-    this.serverDb.transaction(() => {
-      this.serverDb.db
-        .prepare(
-          `UPDATE server_settings
-           SET server_name = ?, registration_mode = ?, room_creation_mode = ?, updated_at = ?
-           WHERE id = 1`,
-        )
-        .run(nextName, nextRegMode, nextRoomMode, nowIso);
+    return this.store.transaction(async tx => {
+      const updated = await tx.serverSettings.update({
+        serverName: nextName,
+        registrationMode: nextRegMode,
+        roomCreationMode: nextRoomMode,
+        updatedAt: nowIso,
+      });
 
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         actorId: actor.id,
         actorName: actor.displayName,
         action: 'server:update-settings',
@@ -243,17 +288,17 @@ export class AuthService {
         },
         createdAt: nowIso,
       });
-    });
 
-    return mapServerSettingsRow(this.serverDb.getSettingsRow());
+      return mapServerSettingsRow(updated);
+    });
   }
 
-  claimSetupToken(input: {
+  async claimSetupToken(input: {
     setupToken: string;
     username: string;
     displayName: string;
     password: string;
-  }): AuthSessionResult {
+  }): Promise<AuthSessionResult> {
     const parsed = setupRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -262,11 +307,13 @@ export class AuthService {
       );
     }
 
-    const setupRequired = this.isSetupRequired();
-    const settingsRow = this.serverDb.getSettingsRow();
+    await this.ensureInitialized();
+    const setupRequired = await this.isSetupRequired();
+    const settingsRow = await this.store.serverSettings.get();
     const hasValidSetupToken =
       setupRequired &&
-      settingsRow.setup_token_hash !== null &&
+      settingsRow?.setup_token_hash !== null &&
+      settingsRow?.setup_token_hash !== undefined &&
       verifyTokenHash(parsed.data.setupToken, settingsRow.setup_token_hash);
 
     if (
@@ -278,26 +325,31 @@ export class AuthService {
       throw new CollabServiceError('FORBIDDEN', 'Setup token is invalid or has already been used.');
     }
 
-    return this.serverDb.transaction(() => {
+    return this.store.transaction(async tx => {
       const nowIso = this.now().toISOString();
       const userId = `usr_${randomUUID()}`;
       const passwordHash = hashPassword(parsed.data.password);
 
-      this.serverDb.db
-        .prepare(
-          `INSERT INTO users (id, username, display_name, password_hash, server_role, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'SERVER_OWNER', 'ACTIVE', ?, ?)`,
-        )
-        .run(userId, parsed.data.username, parsed.data.displayName, passwordHash, nowIso, nowIso);
+      const createdUser = await tx.users.create({
+        id: userId,
+        username: parsed.data.username,
+        displayName: parsed.data.displayName,
+        passwordHash,
+        serverRole: 'SERVER_OWNER',
+        status: 'ACTIVE',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
 
-      this.serverDb.db
-        .prepare('UPDATE server_settings SET setup_token_hash = NULL, updated_at = ? WHERE id = 1')
-        .run(nowIso);
+      await tx.serverSettings.update({
+        setupTokenHash: null,
+        updatedAt: nowIso,
+      });
 
       this.initialSetupToken = null;
 
-      const user = this.requireUserById(userId);
-      this.serverDb.appendAuditLog({
+      const user = mapUserRow(createdUser);
+      await tx.audit.append({
         actorId: user.id,
         actorName: user.displayName,
         action: 'auth:setup',
@@ -306,7 +358,7 @@ export class AuthService {
         createdAt: nowIso,
       });
 
-      const session = this.createSession(user.id);
+      const session = await this.createSession(tx, user.id);
       return {
         user,
         token: session.token,
@@ -315,11 +367,11 @@ export class AuthService {
     });
   }
 
-  registerUser(input: {
+  async registerUser(input: {
     username: string;
     displayName: string;
     password: string;
-  }): RegisterResult {
+  }): Promise<RegisterResult> {
     const parsed = registerRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -328,13 +380,13 @@ export class AuthService {
       );
     }
 
-    const settings = this.getServerSettings();
+    const settings = await this.getServerSettings();
     if (!canServerAction(null, 'auth:register', { registrationMode: settings.registrationMode })) {
       throw new CollabServiceError('FORBIDDEN', 'Self-registration is closed on this server.');
     }
 
-    return this.serverDb.transaction(() => {
-      const existing = this.findUserRowByUsername(parsed.data.username);
+    return this.store.transaction(async tx => {
+      const existing = await tx.users.getByUsername(parsed.data.username);
       if (existing) {
         throw new CollabServiceError(
           'CONFLICT',
@@ -347,15 +399,19 @@ export class AuthService {
       const passwordHash = hashPassword(parsed.data.password);
       const status = settings.registrationMode === 'approval' ? 'PENDING_APPROVAL' : 'ACTIVE';
 
-      this.serverDb.db
-        .prepare(
-          `INSERT INTO users (id, username, display_name, password_hash, server_role, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, 'USER', ?, ?, ?)`,
-        )
-        .run(userId, parsed.data.username, parsed.data.displayName, passwordHash, status, nowIso, nowIso);
+      const userRow = await tx.users.create({
+        id: userId,
+        username: parsed.data.username,
+        displayName: parsed.data.displayName,
+        passwordHash,
+        serverRole: 'USER',
+        status,
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
 
-      const user = this.requireUserById(userId);
-      this.serverDb.appendAuditLog({
+      const user = mapUserRow(userRow);
+      await tx.audit.append({
         actorId: user.id,
         actorName: user.displayName,
         action: 'auth:register',
@@ -371,7 +427,7 @@ export class AuthService {
         };
       }
 
-      const session = this.createSession(user.id);
+      const session = await this.createSession(tx, user.id);
       return {
         status: 'ACTIVE',
         user,
@@ -381,7 +437,7 @@ export class AuthService {
     });
   }
 
-  loginUser(input: { username: string; password: string }): AuthSessionResult {
+  async loginUser(input: { username: string; password: string }): Promise<AuthSessionResult> {
     const parsed = loginRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -390,7 +446,8 @@ export class AuthService {
       );
     }
 
-    const userRow = this.findUserRowByUsername(parsed.data.username);
+    await this.ensureInitialized();
+    const userRow = await this.store.users.getByUsername(parsed.data.username);
     if (!userRow || !verifyPassword(parsed.data.password, userRow.password_hash)) {
       throw new CollabServiceError('UNAUTHORIZED', 'Invalid username or password.');
     }
@@ -407,7 +464,7 @@ export class AuthService {
     }
 
     const user = mapUserRow(userRow);
-    const session = this.createSession(user.id);
+    const session = await this.createSession(this.store, user.id);
     return {
       user,
       token: session.token,
@@ -415,25 +472,24 @@ export class AuthService {
     };
   }
 
-  logoutSession(token: string): { loggedOut: true } {
-    const user = this.authenticateToken(token);
+  async logoutSession(token: string): Promise<{ loggedOut: true }> {
+    const user = await this.authenticateToken(token);
     if (!canServerAction(user.serverRole, 'auth:logout')) {
       throw new CollabServiceError('FORBIDDEN', 'Not permitted to log out.');
     }
     const tokenHash = hashToken(token);
-    this.serverDb.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+    await this.store.sessions.deleteByTokenHash(tokenHash);
     return { loggedOut: true };
   }
 
-  authenticateToken(token: string | null | undefined): UserProfile {
+  async authenticateToken(token: string | null | undefined): Promise<UserProfile> {
     if (!token || typeof token !== 'string' || !token.trim()) {
       throw new CollabServiceError('UNAUTHORIZED', 'Authentication token is required.');
     }
 
+    await this.ensureInitialized();
     const tokenHash = hashToken(token.trim());
-    const sessionRow = this.serverDb.db
-      .prepare('SELECT * FROM sessions WHERE token_hash = ?')
-      .get(tokenHash) as SessionRow | undefined;
+    const sessionRow = await this.store.sessions.getByTokenHash(tokenHash);
 
     if (!sessionRow) {
       throw new CollabServiceError('UNAUTHORIZED', 'Invalid or revoked session token.');
@@ -442,20 +498,20 @@ export class AuthService {
     const nowMs = this.now().getTime();
     const expiresMs = new Date(sessionRow.expires_at).getTime();
     if (Number.isNaN(expiresMs) || expiresMs <= nowMs) {
-      this.serverDb.db.prepare('DELETE FROM sessions WHERE token_hash = ?').run(tokenHash);
+      await this.store.sessions.deleteByTokenHash(tokenHash);
       throw new CollabServiceError('UNAUTHORIZED', 'Session token has expired.');
     }
 
-    const userRow = this.findUserRowById(sessionRow.user_id);
+    const userRow = await this.store.users.getById(sessionRow.user_id);
     if (!userRow || userRow.status !== 'ACTIVE') {
-      this.revokeUserSessions(sessionRow.user_id);
+      await this.revokeUserSessions(sessionRow.user_id);
       throw new CollabServiceError('UNAUTHORIZED', 'User account is not active.');
     }
 
     return mapUserRow(userRow);
   }
 
-  authenticateAuthorizationHeader(authHeader: string | undefined): UserProfile {
+  async authenticateAuthorizationHeader(authHeader: string | undefined): Promise<UserProfile> {
     if (!authHeader) {
       throw new CollabServiceError('UNAUTHORIZED', 'Missing Authorization header.');
     }
@@ -466,62 +522,43 @@ export class AuthService {
     return this.authenticateToken(match[1]);
   }
 
-  getUserById(userId: string): UserProfile | null {
-    const row = this.findUserRowById(userId);
+  async getUserById(userId: string): Promise<UserProfile | null> {
+    await this.ensureInitialized();
+    const row = await this.store.users.getById(userId);
     return row ? mapUserRow(row) : null;
   }
 
-  getUserByUsername(username: string): UserProfile | null {
-    const row = this.findUserRowByUsername(username);
+  async getUserByUsername(username: string): Promise<UserProfile | null> {
+    await this.ensureInitialized();
+    const row = await this.store.users.getByUsername(username);
     return row ? mapUserRow(row) : null;
   }
 
-  searchUserDirectory(actor: UserProfile, query?: string): UserDirectoryEntry[] {
+  async searchUserDirectory(actor: UserProfile, query?: string): Promise<UserDirectoryEntry[]> {
     if (!canServerAction(actor.serverRole, 'users:directory')) {
       throw new CollabServiceError('FORBIDDEN', 'Not permitted to search user directory.');
     }
-    const trimmed = query?.trim() ?? '';
-    let rows: Array<{ id: string; username: string; display_name: string }>;
-    if (!trimmed) {
-      rows = this.serverDb.db
-        .prepare(
-          `SELECT id, username, display_name
-           FROM users
-           WHERE status = 'ACTIVE'
-           ORDER BY username ASC
-           LIMIT 100`,
-        )
-        .all() as Array<{ id: string; username: string; display_name: string }>;
-    } else {
-      const pattern = `%${trimmed}%`;
-      rows = this.serverDb.db
-        .prepare(
-          `SELECT id, username, display_name
-           FROM users
-           WHERE status = 'ACTIVE' AND (username LIKE ? OR display_name LIKE ?)
-           ORDER BY username ASC
-           LIMIT 100`,
-        )
-        .all(pattern, pattern) as Array<{ id: string; username: string; display_name: string }>;
-    }
-    return rows.map(row => ({
-      id: row.id,
-      username: row.username,
-      displayName: row.display_name,
-    }));
+    await this.ensureInitialized();
+    const rows = await this.store.users.search(query?.trim() ?? '', 100);
+    return rows
+      .filter(r => r.status === 'ACTIVE')
+      .map(row => ({
+        id: row.id,
+        username: row.username,
+        displayName: row.display_name,
+      }));
   }
 
-  listUsers(actor: UserProfile): UserAdminRecord[] {
+  async listUsers(actor: UserProfile): Promise<UserAdminRecord[]> {
     if (!canServerAction(actor.serverRole, 'users:list')) {
       throw new CollabServiceError('FORBIDDEN', 'Only server admins can list all users.');
     }
-    const rows = this.serverDb.db
-      .prepare('SELECT * FROM users ORDER BY created_at ASC, username ASC')
-      .all() as UserRow[];
+    await this.ensureInitialized();
+    const rows = await this.store.users.list({ limit: 1000 });
     return rows.map(mapUserRow);
   }
 
-  createUser(
+  async createUser(
     actor: UserProfile,
     input: {
       username: string;
@@ -529,7 +566,7 @@ export class AuthService {
       password: string;
       serverRole?: 'USER' | 'SERVER_ADMIN';
     },
-  ): UserAdminRecord {
+  ): Promise<UserAdminRecord> {
     const parsed = adminCreateUserRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -546,8 +583,9 @@ export class AuthService {
       );
     }
 
-    return this.serverDb.transaction(() => {
-      const existing = this.findUserRowByUsername(parsed.data.username);
+    await this.ensureInitialized();
+    return this.store.transaction(async tx => {
+      const existing = await tx.users.getByUsername(parsed.data.username);
       if (existing) {
         throw new CollabServiceError(
           'CONFLICT',
@@ -559,80 +597,81 @@ export class AuthService {
       const userId = `usr_${randomUUID()}`;
       const passwordHash = hashPassword(parsed.data.password);
 
-      this.serverDb.db
-        .prepare(
-          `INSERT INTO users (id, username, display_name, password_hash, server_role, status, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`,
-        )
-        .run(
-          userId,
-          parsed.data.username,
-          parsed.data.displayName,
-          passwordHash,
-          assignedRole,
-          nowIso,
-          nowIso,
-        );
+      const created = await tx.users.create({
+        id: userId,
+        username: parsed.data.username,
+        displayName: parsed.data.displayName,
+        passwordHash,
+        serverRole: assignedRole,
+        status: 'ACTIVE',
+        createdAt: nowIso,
+        updatedAt: nowIso,
+      });
 
-      const created = this.requireUserById(userId);
-      this.serverDb.appendAuditLog({
+      const userRecord = mapUserRow(created);
+      await tx.audit.append({
         actorId: actor.id,
         actorName: actor.displayName,
         action: 'users:create',
-        targetId: created.id,
-        details: { username: created.username, serverRole: created.serverRole },
+        targetId: userRecord.id,
+        details: { username: userRecord.username, serverRole: userRecord.serverRole },
         createdAt: nowIso,
       });
 
-      return created;
+      return userRecord;
     });
   }
 
-  approveUser(actor: UserProfile, targetUserId: string): UserAdminRecord {
+  async approveUser(actor: UserProfile, targetUserId: string): Promise<UserAdminRecord> {
     if (!canServerAction(actor.serverRole, 'users:approve')) {
       throw new CollabServiceError('FORBIDDEN', 'Only server admins can approve users.');
     }
 
-    return this.serverDb.transaction(() => {
-      const target = this.requireUserById(targetUserId);
+    await this.ensureInitialized();
+    return this.store.transaction(async tx => {
+      const targetRow = await tx.users.getById(targetUserId);
+      if (!targetRow) {
+        throw new CollabServiceError('NOT_FOUND', `User '${targetUserId}' not found.`);
+      }
+
       const nowIso = this.now().toISOString();
+      const updated = await tx.users.update(targetRow.id, {
+        status: 'ACTIVE',
+        updatedAt: nowIso,
+      });
 
-      this.serverDb.db
-        .prepare("UPDATE users SET status = 'ACTIVE', updated_at = ? WHERE id = ?")
-        .run(nowIso, target.id);
-
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         actorId: actor.id,
         actorName: actor.displayName,
         action: 'users:approve',
-        targetId: target.id,
-        details: { username: target.username, previousStatus: target.status },
+        targetId: targetRow.id,
+        details: { username: targetRow.username, previousStatus: targetRow.status },
         createdAt: nowIso,
       });
 
-      return this.requireUserById(target.id);
+      return mapUserRow(updated);
     });
   }
 
-  disableUser(actor: UserProfile, targetUserId: string, disabled = true): UserAdminRecord {
+  async disableUser(actor: UserProfile, targetUserId: string, disabled = true): Promise<UserAdminRecord> {
     return this.updateUser(actor, targetUserId, {
       status: disabled ? 'DISABLED' : 'ACTIVE',
     });
   }
 
-  enableUser(actor: UserProfile, targetUserId: string): UserAdminRecord {
+  async enableUser(actor: UserProfile, targetUserId: string): Promise<UserAdminRecord> {
     return this.disableUser(actor, targetUserId, false);
   }
 
-  changeServerRole(
+  async changeServerRole(
     actor: UserProfile,
     targetUserId: string,
     newRole: 'USER' | 'SERVER_ADMIN',
-  ): UserAdminRecord {
+  ): Promise<UserAdminRecord> {
     return this.updateUser(actor, targetUserId, { serverRole: newRole });
   }
 
-  updateUser(
+  async updateUser(
     actor: UserProfile,
     targetUserId: string,
     input: {
@@ -640,7 +679,7 @@ export class AuthService {
       serverRole?: 'USER' | 'SERVER_ADMIN';
       displayName?: string;
     },
-  ): UserAdminRecord {
+  ): Promise<UserAdminRecord> {
     const parsed = adminUpdateUserRequestSchema.safeParse(input);
     if (!parsed.success) {
       throw new CollabServiceError(
@@ -649,8 +688,13 @@ export class AuthService {
       );
     }
 
-    return this.serverDb.transaction(() => {
-      const target = this.requireUserById(targetUserId);
+    await this.ensureInitialized();
+    return this.store.transaction(async tx => {
+      const targetRow = await tx.users.getById(targetUserId);
+      if (!targetRow) {
+        throw new CollabServiceError('NOT_FOUND', `User '${targetUserId}' not found.`);
+      }
+      const target = mapUserRow(targetRow);
 
       if (parsed.data.serverRole !== undefined) {
         if (
@@ -688,20 +732,19 @@ export class AuthService {
       const nextDisplayName = parsed.data.displayName ?? target.displayName;
       const nowIso = this.now().toISOString();
 
-      this.serverDb.db
-        .prepare(
-          `UPDATE users
-           SET status = ?, server_role = ?, display_name = ?, updated_at = ?
-           WHERE id = ?`,
-        )
-        .run(nextStatus, nextRole, nextDisplayName, nowIso, target.id);
+      const updated = await tx.users.update(target.id, {
+        status: nextStatus,
+        serverRole: nextRole,
+        displayName: nextDisplayName,
+        updatedAt: nowIso,
+      });
 
       if (nextStatus === 'DISABLED') {
-        this.revokeUserSessions(target.id);
+        await tx.sessions.deleteByUserId(target.id);
       }
 
       if (parsed.data.serverRole !== undefined && parsed.data.serverRole !== target.serverRole) {
-        this.serverDb.appendAuditLog({
+        await tx.audit.append({
           actorId: actor.id,
           actorName: actor.displayName,
           action: 'users:change-server-role',
@@ -712,7 +755,7 @@ export class AuthService {
       }
 
       if (parsed.data.status !== undefined && parsed.data.status !== target.status) {
-        this.serverDb.appendAuditLog({
+        await tx.audit.append({
           actorId: actor.id,
           actorName: actor.displayName,
           action: 'users:disable',
@@ -722,15 +765,15 @@ export class AuthService {
         });
       }
 
-      return this.requireUserById(target.id);
+      return mapUserRow(updated);
     });
   }
 
-  resetPassword(
+  async resetPassword(
     actor: UserProfile,
     targetUserId: string,
     input: { newPassword: string } | string,
-  ): { reset: true } {
+  ): Promise<{ reset: true }> {
     const payload = typeof input === 'string' ? { newPassword: input } : input;
     const parsed = adminResetPasswordRequestSchema.safeParse(payload);
     if (!parsed.success) {
@@ -740,35 +783,40 @@ export class AuthService {
       );
     }
 
-    return this.serverDb.transaction(() => {
-      const target = this.requireUserById(targetUserId);
+    await this.ensureInitialized();
+    return this.store.transaction(async tx => {
+      const targetRow = await tx.users.getById(targetUserId);
+      if (!targetRow) {
+        throw new CollabServiceError('NOT_FOUND', `User '${targetUserId}' not found.`);
+      }
 
       if (
         !canServerAction(actor.serverRole, 'users:reset-password', {
-          targetRole: target.serverRole,
+          targetRole: targetRow.server_role,
         })
       ) {
         throw new CollabServiceError(
           'FORBIDDEN',
-          `Role '${actor.serverRole}' cannot reset password for a '${target.serverRole}' account.`,
+          `Role '${actor.serverRole}' cannot reset password for a '${targetRow.server_role}' account.`,
         );
       }
 
       const nowIso = this.now().toISOString();
       const passwordHash = hashPassword(parsed.data.newPassword);
 
-      this.serverDb.db
-        .prepare('UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?')
-        .run(passwordHash, nowIso, target.id);
+      await tx.users.update(targetRow.id, {
+        passwordHash,
+        updatedAt: nowIso,
+      });
 
-      this.revokeUserSessions(target.id);
+      await tx.sessions.deleteByUserId(targetRow.id);
 
-      this.serverDb.appendAuditLog({
+      await tx.audit.append({
         actorId: actor.id,
         actorName: actor.displayName,
         action: 'users:reset-password',
-        targetId: target.id,
-        details: { username: target.username },
+        targetId: targetRow.id,
+        details: { username: targetRow.username },
         createdAt: nowIso,
       });
 
@@ -776,51 +824,35 @@ export class AuthService {
     });
   }
 
-  revokeUserSessions(userId: string): void {
-    this.serverDb.db.prepare('DELETE FROM sessions WHERE user_id = ?').run(userId);
+  async revokeUserSessions(userId: string): Promise<void> {
+    await this.store.sessions.deleteByUserId(userId);
   }
 
-  listServerAuditLog(actor: UserProfile, limit = 100): AuditEntry[] {
+  async listServerAuditLog(actor: UserProfile, limit = 100): Promise<AuditEntry[]> {
     if (!canServerAction(actor.serverRole, 'audit:view-server')) {
       throw new CollabServiceError('FORBIDDEN', 'Only server admins can view the server audit log.');
     }
-    return this.serverDb.listAuditLog({ limit });
+    const rows = await this.store.audit.list({ limit });
+    return rows.map(mapAuditLogRow);
   }
 
-  private createSession(userId: string): { token: string; expiresAt: string } {
+  private async createSession(
+    storeOrTx: ServerStore,
+    userId: string,
+  ): Promise<{ token: string; expiresAt: string }> {
     const token = generateRandomToken(32);
     const tokenHash = hashToken(token);
     const now = this.now();
     const createdAt = now.toISOString();
     const expiresAt = new Date(now.getTime() + this.sessionTtlMs).toISOString();
 
-    this.serverDb.db
-      .prepare(
-        `INSERT INTO sessions (token_hash, user_id, created_at, expires_at)
-         VALUES (?, ?, ?, ?)`,
-      )
-      .run(tokenHash, userId, createdAt, expiresAt);
+    await storeOrTx.sessions.create({
+      tokenHash,
+      userId,
+      createdAt,
+      expiresAt,
+    });
 
     return { token, expiresAt };
-  }
-
-  private findUserRowById(userId: string): UserRow | undefined {
-    return this.serverDb.db.prepare('SELECT * FROM users WHERE id = ?').get(userId) as
-      | UserRow
-      | undefined;
-  }
-
-  private findUserRowByUsername(username: string): UserRow | undefined {
-    return this.serverDb.db
-      .prepare('SELECT * FROM users WHERE username = ? COLLATE NOCASE')
-      .get(username.trim()) as UserRow | undefined;
-  }
-
-  private requireUserById(userId: string): UserProfile {
-    const row = this.findUserRowById(userId);
-    if (!row) {
-      throw new CollabServiceError('NOT_FOUND', `User '${userId}' not found.`);
-    }
-    return mapUserRow(row);
   }
 }

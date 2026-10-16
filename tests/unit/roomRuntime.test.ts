@@ -14,6 +14,7 @@ import type {
   WsClientMessage,
   WsServerMessage,
 } from '../../src/shared/collab/types.js';
+import { createTestStore, type TestStoreFixture } from './testDbHelper.js';
 
 interface TestWsClient {
   ws: WebSocket;
@@ -141,9 +142,10 @@ async function apiJson<T = any>(
   return { status: response.status, body: json };
 }
 
-describe('T05 / R01: RoomRuntime, CollabServer, REST API, and WebSocket handshake', () => {
+describe('T05 / R01 / R02: RoomRuntime, CollabServer, REST API, and WebSocket handshake', () => {
   const tempDirs: string[] = [];
   const activeServers: CollabServer[] = [];
+  const fixtures: TestStoreFixture[] = [];
 
   function createTempDir(): string {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'hlr-server-test-'));
@@ -155,6 +157,10 @@ describe('T05 / R01: RoomRuntime, CollabServer, REST API, and WebSocket handshak
     while (activeServers.length > 0) {
       const srv = activeServers.pop()!;
       await srv.stop();
+    }
+    while (fixtures.length > 0) {
+      const fixture = fixtures.pop()!;
+      await fixture.cleanup();
     }
     while (tempDirs.length > 0) {
       const dir = tempDirs.pop()!;
@@ -174,7 +180,11 @@ describe('T05 / R01: RoomRuntime, CollabServer, REST API, and WebSocket handshak
 
   it('starts CollabServer on an ephemeral port with HTTPS/WSS by default and exposes setup token and TLS fingerprint', async () => {
     const dataDir = createTempDir();
+    const fixture = await createTestStore({ schemaPrefix: 'runtime_test' });
+    fixtures.push(fixture);
+
     const server = new CollabServer({
+      store: fixture.store,
       dataDir,
       host: '127.0.0.1',
       port: 0,
@@ -199,7 +209,11 @@ describe('T05 / R01: RoomRuntime, CollabServer, REST API, and WebSocket handshak
 
   it('exercises REST auth, admin, room lobby, invites, join requests, export, and audit endpoints end-to-end', async () => {
     const dataDir = createTempDir();
+    const fixture = await createTestStore({ schemaPrefix: 'runtime_test' });
+    fixtures.push(fixture);
+
     const server = new CollabServer({
+      store: fixture.store,
       dataDir,
       host: '127.0.0.1',
       port: 0,
@@ -287,7 +301,11 @@ describe('T05 / R01: RoomRuntime, CollabServer, REST API, and WebSocket handshak
 
   it('connects WebSocket client and receives room-welcome handshake', async () => {
     const dataDir = createTempDir();
+    const fixture = await createTestStore({ schemaPrefix: 'runtime_test' });
+    fixtures.push(fixture);
+
     const server = new CollabServer({
+      store: fixture.store,
       dataDir,
       host: '127.0.0.1',
       port: 0,
@@ -297,7 +315,7 @@ describe('T05 / R01: RoomRuntime, CollabServer, REST API, and WebSocket handshak
     activeServers.push(server);
     const info = await server.start();
 
-    const ownerSession = server.authService.claimSetupToken({
+    const ownerSession = await server.authService.claimSetupToken({
       setupToken: info.setupToken!,
       username: 'owner',
       displayName: 'Owner User',

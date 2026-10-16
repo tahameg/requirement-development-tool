@@ -11,7 +11,8 @@ import {
 import { CollabServer, type CollabServerOptions } from './httpServer.js';
 
 export { AuthService, CollabServiceError } from './auth.js';
-export { ServerDatabase } from './db.js';
+export { CollabServiceError as ServiceError } from './errors.js';
+export * from './store/index.js';
 export {
   DiscoveryBroadcaster,
   buildDiscoveryBeacon,
@@ -47,6 +48,9 @@ export function parseServerCliArgs(
   env: NodeJS.ProcessEnv = process.env,
 ): ParsedServerCliArgs {
   let dataDir = env.HLR_SERVER_DATA_DIR?.trim() || path.resolve(process.cwd(), '.hlr-server-data');
+  let databaseUrl = env.HLR_DATABASE_URL?.trim() || env.DATABASE_URL?.trim() || undefined;
+  let dbPool = env.HLR_DB_POOL ? Number.parseInt(env.HLR_DB_POOL, 10) : undefined;
+  let migrateOnly = env.HLR_MIGRATE_ONLY === '1' || env.HLR_MIGRATE_ONLY === 'true';
   let host = env.HLR_SERVER_HOST?.trim() || '0.0.0.0';
   let port = env.HLR_SERVER_PORT ? Number.parseInt(env.HLR_SERVER_PORT, 10) : DEFAULT_SERVER_PORT;
   let insecureHttp =
@@ -70,6 +74,16 @@ export function parseServerCliArgs(
     const arg = argv[i]!;
     if (arg === '--help' || arg === '-h') {
       help = true;
+    } else if (arg === '--migrate-only') {
+      migrateOnly = true;
+    } else if (arg === '--database-url' && argv[i + 1]) {
+      databaseUrl = argv[++i]!;
+    } else if (arg.startsWith('--database-url=')) {
+      databaseUrl = arg.slice('--database-url='.length);
+    } else if (arg === '--db-pool' && argv[i + 1]) {
+      dbPool = Number.parseInt(argv[++i]!, 10);
+    } else if (arg.startsWith('--db-pool=')) {
+      dbPool = Number.parseInt(arg.slice('--db-pool='.length), 10);
     } else if (arg === '--insecure-http') {
       insecureHttp = true;
     } else if (arg === '--no-discovery') {
@@ -82,6 +96,8 @@ export function parseServerCliArgs(
       dataDir = path.resolve(argv[++i]!);
     } else if (arg.startsWith('--data-dir=')) {
       dataDir = path.resolve(arg.slice('--data-dir='.length));
+    } else if (arg.startsWith('--data-dir')) {
+      dataDir = path.resolve(argv[++i]!);
     } else if (arg === '--host' && argv[i + 1]) {
       host = argv[++i]!;
     } else if (arg.startsWith('--host=')) {
@@ -136,6 +152,9 @@ export function parseServerCliArgs(
 
   return {
     dataDir,
+    databaseUrl,
+    dbPool,
+    migrateOnly,
     host,
     port,
     insecureHttp,
@@ -156,7 +175,10 @@ export function formatServerHelpText(): string {
     'Usage: npm run server -- [options]',
     '',
     'Options:',
-    '  --data-dir <path>                         Server data directory (default: ./.hlr-server-data)',
+    '  --database-url <url>                      PostgreSQL connection string (default: HLR_DATABASE_URL)',
+    '  --db-pool <size>                          PostgreSQL connection pool size (default: 10)',
+    '  --migrate-only                            Run schema migrations and exit',
+    '  --data-dir <path>                         Server data directory for TLS certs (default: ./.hlr-server-data)',
     '  --host <address>                          Bind host address (default: 0.0.0.0)',
     `  --port <port>                             Bind port (default: ${DEFAULT_SERVER_PORT})`,
     '  --name <name>                             Server display name',
@@ -181,35 +203,52 @@ export async function startServerFromCli(
     return null;
   }
 
-  const server = new CollabServer(parsed);
-  const info = await server.start();
+  let server: CollabServer;
+  try {
+    server = new CollabServer(parsed);
+  } catch (err) {
+    log(`Configuration error: ${err instanceof Error ? err.message : String(err)}`);
+    throw err;
+  }
 
-  log('============================================================');
-  log(`HLR Collaboration Server started`);
-  log(`Server ID   : ${info.serverId}`);
-  log(`Data Dir    : ${parsed.dataDir}`);
-  log(`Listen URL  : ${info.url}`);
-  log(`WebSocket   : ${info.wsUrl}/ws/rooms/<roomId>`);
-  if (info.tls && info.fingerprint) {
-    log(`TLS SHA-256 : ${info.fingerprint}`);
-  } else {
-    log(`TLS         : DISABLED (--insecure-http)`);
-  }
-  if (info.discoveryPort) {
-    log(`Discovery   : UDP port ${info.discoveryPort} (broadcast)`);
-  } else {
-    log(`Discovery   : DISABLED (--no-discovery)`);
-  }
-  if (info.setupToken) {
-    log('------------------------------------------------------------');
-    log('FIRST-RUN SERVER OWNER SETUP REQUIRED');
-    log(`One-Time Setup Token: ${info.setupToken}`);
-    log('Enter this setup token in the HLR Writing Tool client to claim');
-    log('the initial SERVER_OWNER account.');
-  }
-  log('============================================================');
+  try {
+    const info = await server.start();
 
-  return server;
+    if (parsed.migrateOnly) {
+      log('Database migrations applied successfully (--migrate-only).');
+      await server.stop();
+      return null;
+    }
+
+    log('============================================================');
+    log(`HLR Collaboration Server started`);
+    log(`Server ID   : ${info.serverId}`);
+    log(`Listen URL  : ${info.url}`);
+    log(`WebSocket   : ${info.wsUrl}/ws/rooms/<roomId>`);
+    if (info.tls && info.fingerprint) {
+      log(`TLS SHA-256 : ${info.fingerprint}`);
+    } else {
+      log(`TLS         : DISABLED (--insecure-http)`);
+    }
+    if (info.discoveryPort) {
+      log(`Discovery   : UDP port ${info.discoveryPort} (broadcast)`);
+    } else {
+      log(`Discovery   : DISABLED (--no-discovery)`);
+    }
+    if (info.setupToken) {
+      log('------------------------------------------------------------');
+      log('FIRST-RUN SERVER OWNER SETUP REQUIRED');
+      log(`One-Time Setup Token: ${info.setupToken}`);
+      log('Enter this setup token in the HLR Writing Tool client to claim');
+      log('the initial SERVER_OWNER account.');
+    }
+    log('============================================================');
+
+    return server;
+  } catch (err) {
+    log(`Failed to start HLR Collaboration Server: ${err instanceof Error ? err.message : String(err)}`);
+    throw err;
+  }
 }
 
 const isMainEntry =

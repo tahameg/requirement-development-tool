@@ -8,13 +8,19 @@ import {
   type RegistrationMode,
   type RoomCreationMode,
   type ServerPublicInfo,
+  type ServerSettings,
   type UserProfile,
 } from '../shared/collab/types.js';
 import { AuthService } from './auth.js';
-import { CollabServiceError, ServerDatabase } from './db.js';
 import { DiscoveryBroadcaster } from './discovery.js';
+import { CollabServiceError } from './errors.js';
 import { RoomRuntimeManager } from './roomRuntime.js';
 import { RoomService } from './rooms.js';
+import {
+  PgServerStore,
+  runMigrations,
+  type ServerStore,
+} from './store/index.js';
 import {
   ensureServerTlsCertificate,
   generateSelfSignedCertificate,
@@ -26,7 +32,11 @@ import { CollabWsHandler } from './wsHandler.js';
 const MAX_JSON_BODY_BYTES = 50 * 1024 * 1024; // 50 MB for large imported workspaces
 
 export interface CollabServerOptions {
-  dataDir: string;
+  dataDir?: string;
+  databaseUrl?: string;
+  dbPool?: number;
+  store?: ServerStore;
+  migrateOnly?: boolean;
   host?: string;
   port?: number;
   insecureHttp?: boolean;
@@ -60,14 +70,13 @@ export interface CollabServerListenInfo {
   discoveryPort: number | null;
 }
 
-function sendJson(res: ServerResponse, status: number, payload: unknown): void {
-  const body = JSON.stringify(payload);
-  res.writeHead(status, {
+function sendJson(res: ServerResponse, statusCode: number, payload: unknown): void {
+  const json = JSON.stringify(payload);
+  res.writeHead(statusCode, {
     'Content-Type': 'application/json; charset=utf-8',
-    'Content-Length': Buffer.byteLength(body, 'utf8'),
-    'Cache-Control': 'no-store',
+    'Content-Length': Buffer.byteLength(json),
   });
-  res.end(body);
+  res.end(json);
 }
 
 function sendSuccess(res: ServerResponse, value: unknown, status = 200): void {
@@ -79,53 +88,44 @@ function sendSuccess(res: ServerResponse, value: unknown, status = 200): void {
 
 function sendError(
   res: ServerResponse,
-  status: number,
+  statusCode: number,
   code: ApiErrorCode,
   error: string,
 ): void {
-  sendJson(res, status, {
-    ok: false,
-    code,
-    error,
-  });
+  sendJson(res, statusCode, { ok: false, code, error });
 }
 
 async function readJsonBody(req: IncomingMessage): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
-    let totalBytes = 0;
+    let bytesReceived = 0;
 
-    req.on('data', (chunk: Buffer | string) => {
-      const buf = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk;
-      totalBytes += buf.length;
-      if (totalBytes > MAX_JSON_BODY_BYTES) {
-        reject(new CollabServiceError('BAD_REQUEST', 'Request body exceeds maximum allowed size.'));
+    req.on('data', (chunk: Buffer) => {
+      bytesReceived += chunk.length;
+      if (bytesReceived > MAX_JSON_BODY_BYTES) {
         req.destroy();
+        reject(
+          new CollabServiceError('BAD_REQUEST', 'Request payload exceeds maximum allowed size (50MB).'),
+        );
         return;
       }
-      chunks.push(buf);
+      chunks.push(chunk);
     });
 
     req.on('end', () => {
-      if (chunks.length === 0 || totalBytes === 0) {
-        resolve({});
-        return;
-      }
-      const rawText = Buffer.concat(chunks).toString('utf8').trim();
-      if (!rawText) {
+      if (chunks.length === 0) {
         resolve({});
         return;
       }
       try {
-        resolve(JSON.parse(rawText));
+        const text = Buffer.concat(chunks).toString('utf8');
+        resolve(JSON.parse(text));
       } catch {
-        reject(new CollabServiceError('BAD_REQUEST', 'Malformed JSON request body.'));
+        reject(new CollabServiceError('BAD_REQUEST', 'Invalid JSON body.'));
       }
     });
 
-    req.on('error', err => {
-      reject(err);
-    });
+    req.on('error', err => reject(err));
   });
 }
 
@@ -142,7 +142,7 @@ function extractBearerToken(req: IncomingMessage): string {
 }
 
 export class CollabServer {
-  readonly serverDb: ServerDatabase;
+  readonly store: ServerStore;
   readonly authService: AuthService;
   readonly roomService: RoomService;
   readonly runtimeManager: RoomRuntimeManager;
@@ -156,39 +156,58 @@ export class CollabServer {
   private readonly requestedPort: number;
   private httpServer: http.Server | https.Server | null = null;
   private listeningPort: number | null = null;
+  private readonly options: CollabServerOptions;
+  private cachedSettings: ServerSettings | null = null;
+  private cachedSetupToken: string | null = null;
+  private cachedSetupRequired = false;
 
   constructor(options: CollabServerOptions) {
+    this.options = options;
     this.host = options.host ?? '0.0.0.0';
     this.requestedPort = options.port ?? DEFAULT_SERVER_PORT;
     this.insecureHttp = options.insecureHttp ?? false;
     this.version = options.version ?? '0.6.0';
 
-    this.serverDb = ServerDatabase.open(options.dataDir, {
-      serverName: options.serverName,
-      registrationMode: options.registrationMode,
-      roomCreationMode: options.roomCreationMode,
-      now: options.now,
-    });
+    if (options.store) {
+      this.store = options.store;
+    } else {
+      const dbUrl =
+        options.databaseUrl ??
+        process.env.HLR_DATABASE_URL ??
+        process.env.HLR_TEST_DATABASE_URL;
+      if (!dbUrl) {
+        throw new Error(
+          'Database connection URL is required. Provide --database-url or set HLR_DATABASE_URL environment variable.',
+        );
+      }
+      this.store = PgServerStore.create({
+        databaseUrl: dbUrl,
+        maxConnections: options.dbPool ?? 10,
+      });
+    }
 
     if (this.insecureHttp) {
       this.tlsBundle = null;
-    } else if (this.serverDb.dataDir === ':memory:') {
+    } else if (!options.dataDir || options.dataDir === ':memory:') {
       this.tlsBundle = generateSelfSignedCertificate(options.tlsOptions);
     } else {
-      this.tlsBundle = ensureServerTlsCertificate(this.serverDb.dataDir, options.tlsOptions);
+      this.tlsBundle = ensureServerTlsCertificate(options.dataDir, options.tlsOptions);
     }
 
-    this.authService = new AuthService(this.serverDb, {
+    this.authService = new AuthService(this.store, {
       sessionTtlMs: options.sessionTtlMs,
       initialSetupToken: options.initialSetupToken,
       now: options.now,
+      serverName: options.serverName,
+      registrationMode: options.registrationMode,
+      roomCreationMode: options.roomCreationMode,
     });
 
-    this.roomService = new RoomService(this.serverDb, {
+    this.roomService = new RoomService(this.store, {
       now: options.now,
     });
 
-    this.runtimeManager = new RoomRuntimeManager(this.serverDb, this.roomService, {
+    this.runtimeManager = new RoomRuntimeManager(this.store, this.roomService, {
       autosaveDebounceMs: options.autosaveDebounceMs,
       autosaveMaxWaitMs: options.autosaveMaxWaitMs,
       now: options.now,
@@ -205,10 +224,11 @@ export class CollabServer {
         ? null
         : new DiscoveryBroadcaster({
             getBeaconInfo: () => {
-              const settings = this.authService.getServerSettings();
+              const serverId = this.cachedSettings?.serverId ?? 'srv_unknown';
+              const name = this.cachedSettings?.name ?? 'HLR Collaboration Server';
               return {
-                serverId: settings.serverId,
-                name: settings.name,
+                serverId,
+                name,
                 version: this.version,
                 host: this.host,
                 port: this.getPort(),
@@ -229,20 +249,40 @@ export class CollabServer {
     return this.listeningPort;
   }
 
+  getHost(): string {
+    return this.host;
+  }
+
+  getProtocol(): 'http' | 'https' {
+    return this.insecureHttp ? 'http' : 'https';
+  }
+
   getFingerprint(): string | null {
     return this.tlsBundle?.fingerprint ?? null;
   }
 
+  getTlsInfo(): { tls: boolean; fingerprint: string | null } {
+    return {
+      tls: !this.insecureHttp,
+      fingerprint: this.getFingerprint(),
+    };
+  }
+
   getSetupToken(): string | null {
-    return this.authService.getInitialSetupToken();
+    return this.cachedSetupToken;
   }
 
   getPublicInfo(): ServerPublicInfo {
-    return this.authService.getPublicInfo({
+    return {
+      serverId: this.cachedSettings?.serverId ?? 'srv_unknown',
+      name: this.cachedSettings?.name ?? 'HLR Collaboration Server',
       version: this.version,
       tls: !this.insecureHttp,
       fingerprint: this.getFingerprint(),
-    });
+      setupRequired: this.cachedSetupRequired,
+      registrationMode: this.cachedSettings?.registrationMode ?? 'open',
+      roomCreationMode: this.cachedSettings?.roomCreationMode ?? 'all_users',
+    };
   }
 
   getListenInfo(): CollabServerListenInfo {
@@ -250,7 +290,6 @@ export class CollabServer {
     const displayHost = this.host === '0.0.0.0' || this.host === '::' ? '127.0.0.1' : this.host;
     const protocol = this.insecureHttp ? 'http' : 'https';
     const wsProtocol = this.insecureHttp ? 'ws' : 'wss';
-    const settings = this.authService.getServerSettings();
 
     return {
       host: this.host,
@@ -261,8 +300,8 @@ export class CollabServer {
       wsUrl: `${wsProtocol}://${displayHost}:${port}`,
       tls: !this.insecureHttp,
       fingerprint: this.getFingerprint(),
-      setupToken: this.getSetupToken(),
-      serverId: settings.serverId,
+      setupToken: this.cachedSetupToken,
+      serverId: this.cachedSettings?.serverId ?? 'srv_unknown',
       discoveryPort: this.discoveryBroadcaster ? this.discoveryBroadcaster.getDiscoveryPort() : null,
     };
   }
@@ -278,6 +317,40 @@ export class CollabServer {
   async start(): Promise<CollabServerListenInfo> {
     if (this.httpServer) {
       return this.getListenInfo();
+    }
+
+    // Run database migrations on startup
+    const pool = (this.store as any).pool;
+    if (pool) {
+      try {
+        await runMigrations(pool);
+      } catch (err) {
+        throw new Error(
+          `Failed to apply PostgreSQL migrations: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+
+    // Initialize auth state and cache settings
+    await this.authService.initialize(this.options.initialSetupToken);
+    this.cachedSettings = await this.authService.getServerSettings();
+    this.cachedSetupToken = await this.authService.getInitialSetupToken();
+    this.cachedSetupRequired = await this.authService.isSetupRequired();
+
+    if (this.options.migrateOnly) {
+      return {
+        host: this.host,
+        port: 0,
+        protocol: this.getProtocol(),
+        wsProtocol: this.insecureHttp ? 'ws' : 'wss',
+        url: '',
+        wsUrl: '',
+        tls: !this.insecureHttp,
+        fingerprint: this.getFingerprint(),
+        setupToken: this.cachedSetupToken,
+        serverId: this.cachedSettings.serverId,
+        discoveryPort: null,
+      };
     }
 
     const requestListener = (req: IncomingMessage, res: ServerResponse) => {
@@ -324,29 +397,32 @@ export class CollabServer {
     return this.getListenInfo();
   }
 
+  private isStopping = false;
+
   async stop(): Promise<void> {
+    if (this.isStopping) return;
+    this.isStopping = true;
+
     if (this.discoveryBroadcaster) {
       await this.discoveryBroadcaster.stop();
     }
 
     await this.runtimeManager.closeAll();
-    this.wsHandler.closeAll();
 
     if (this.httpServer) {
-      const server = this.httpServer;
+      await new Promise<void>(resolve => {
+        this.httpServer!.close(() => resolve());
+      });
       this.httpServer = null;
       this.listeningPort = null;
-      await new Promise<void>(resolve => {
-        server.close(() => resolve());
-      });
     }
 
-    this.roomService.cleanupTempDir();
-    this.serverDb.close();
+    await this.store.close();
   }
 
-  private authenticate(req: IncomingMessage): UserProfile {
-    return this.authService.authenticateAuthorizationHeader(req.headers.authorization);
+  private async authenticate(req: IncomingMessage): Promise<UserProfile> {
+    const token = extractBearerToken(req);
+    return this.authService.authenticateToken(token);
   }
 
   private async handleHttpRequest(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -358,22 +434,39 @@ export class CollabServer {
       // --- 2.1 Public & Authentication Endpoints ---
 
       if (method === 'GET' && pathname === '/api/server/info') {
-        sendSuccess(res, this.getPublicInfo());
+        const info = await this.authService.getPublicInfo({
+          version: this.version,
+          tls: !this.insecureHttp,
+          fingerprint: this.getFingerprint(),
+        });
+        sendSuccess(res, info);
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/api/server/public') {
+        const info = await this.authService.getPublicInfo({
+          version: this.version,
+          tls: !this.insecureHttp,
+          fingerprint: this.getFingerprint(),
+        });
+        sendSuccess(res, { server: info });
         return;
       }
 
       if (method === 'POST' && pathname === '/api/auth/setup') {
         const body = await readJsonBody(req);
-        const result = this.authService.claimSetupToken(
+        const result = await this.authService.claimSetupToken(
           body as Parameters<AuthService['claimSetupToken']>[0],
         );
+        this.cachedSetupToken = null;
+        this.cachedSetupRequired = false;
         sendSuccess(res, result, 201);
         return;
       }
 
       if (method === 'POST' && pathname === '/api/auth/register') {
         const body = await readJsonBody(req);
-        const result = this.authService.registerUser(
+        const result = await this.authService.registerUser(
           body as Parameters<AuthService['registerUser']>[0],
         );
         sendSuccess(res, result, 201);
@@ -382,28 +475,28 @@ export class CollabServer {
 
       if (method === 'POST' && pathname === '/api/auth/login') {
         const body = await readJsonBody(req);
-        const result = this.authService.loginUser(body as Parameters<AuthService['loginUser']>[0]);
+        const result = await this.authService.loginUser(body as Parameters<AuthService['loginUser']>[0]);
         sendSuccess(res, result, 200);
         return;
       }
 
       if (method === 'POST' && pathname === '/api/auth/logout') {
         const token = extractBearerToken(req);
-        const result = this.authService.logoutSession(token);
+        const result = await this.authService.logoutSession(token);
         sendSuccess(res, result, 200);
         return;
       }
 
       if (method === 'GET' && pathname === '/api/auth/me') {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         sendSuccess(res, { user }, 200);
         return;
       }
 
       if (method === 'GET' && pathname === '/api/users/directory') {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const q = url.searchParams.get('q') ?? undefined;
-        const users = this.authService.searchUserDirectory(user, q);
+        const users = await this.authService.searchUserDirectory(user, q);
         sendSuccess(res, { users }, 200);
         return;
       }
@@ -411,27 +504,28 @@ export class CollabServer {
       // --- 2.2 Server Administration Endpoints ---
 
       if (method === 'PATCH' && pathname === '/api/admin/settings') {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const body = await readJsonBody(req);
-        const settings = this.authService.updateServerSettings(
+        const settings = await this.authService.updateServerSettings(
           user,
           body as Parameters<AuthService['updateServerSettings']>[1],
         );
+        this.cachedSettings = settings;
         sendSuccess(res, { settings }, 200);
         return;
       }
 
       if (method === 'GET' && pathname === '/api/admin/users') {
-        const user = this.authenticate(req);
-        const users = this.authService.listUsers(user);
+        const user = await this.authenticate(req);
+        const users = await this.authService.listUsers(user);
         sendSuccess(res, { users }, 200);
         return;
       }
 
       if (method === 'POST' && pathname === '/api/admin/users') {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const body = await readJsonBody(req);
-        const created = this.authService.createUser(
+        const created = await this.authService.createUser(
           user,
           body as Parameters<AuthService['createUser']>[1],
         );
@@ -441,19 +535,19 @@ export class CollabServer {
 
       const approveUserMatch = /^\/api\/admin\/users\/([^/]+)\/approve$/.exec(pathname);
       if (method === 'POST' && approveUserMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const targetUserId = decodeURIComponent(approveUserMatch[1]);
-        const updated = this.authService.approveUser(user, targetUserId);
+        const updated = await this.authService.approveUser(user, targetUserId);
         sendSuccess(res, { user: updated }, 200);
         return;
       }
 
       const resetPassMatch = /^\/api\/admin\/users\/([^/]+)\/reset-password$/.exec(pathname);
       if (method === 'POST' && resetPassMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const targetUserId = decodeURIComponent(resetPassMatch[1]);
         const body = await readJsonBody(req);
-        const result = this.authService.resetPassword(
+        const result = await this.authService.resetPassword(
           user,
           targetUserId,
           body as Parameters<AuthService['resetPassword']>[2],
@@ -468,10 +562,10 @@ export class CollabServer {
 
       const updateUserMatch = /^\/api\/admin\/users\/([^/]+)$/.exec(pathname);
       if (method === 'PATCH' && updateUserMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const targetUserId = decodeURIComponent(updateUserMatch[1]);
         const body = await readJsonBody(req);
-        const updated = this.authService.updateUser(
+        const updated = await this.authService.updateUser(
           user,
           targetUserId,
           body as Parameters<AuthService['updateUser']>[2],
@@ -487,27 +581,27 @@ export class CollabServer {
       }
 
       if (method === 'GET' && pathname === '/api/admin/rooms') {
-        const user = this.authenticate(req);
-        const rooms = this.roomService.listAllRoomsAdmin(user);
+        const user = await this.authenticate(req);
+        const rooms = await this.roomService.listAllRoomsAdmin(user);
         sendSuccess(res, { rooms }, 200);
         return;
       }
 
       const resolveRoomMatch = /^\/api\/admin\/rooms\/([^/]+)\/resolve$/.exec(pathname);
       if (method === 'POST' && resolveRoomMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(resolveRoomMatch[1]);
         const body = await readJsonBody(req);
-        const room = this.roomService.resolveStuckRoom(user, roomId, body);
+        const room = await this.roomService.resolveStuckRoom(user, roomId, body);
         sendSuccess(res, { room }, 200);
         return;
       }
 
       if (method === 'GET' && pathname === '/api/admin/audit') {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const rawLimit = url.searchParams.get('limit');
         const limit = rawLimit ? Number.parseInt(rawLimit, 10) : 100;
-        const entries = this.authService.listServerAuditLog(
+        const entries = await this.authService.listServerAuditLog(
           user,
           Number.isFinite(limit) ? limit : 100,
         );
@@ -518,14 +612,14 @@ export class CollabServer {
       // --- 2.3 Room Lobby, Membership, Invites & Join Requests Endpoints ---
 
       if (method === 'GET' && pathname === '/api/rooms') {
-        const user = this.authenticate(req);
-        const lobby = this.roomService.listRoomsForUser(user);
+        const user = await this.authenticate(req);
+        const lobby = await this.roomService.listRoomsForUser(user);
         sendSuccess(res, lobby, 200);
         return;
       }
 
       if (method === 'POST' && pathname === '/api/rooms') {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const body = await readJsonBody(req);
         const room = await this.roomService.createRoom(user, body);
         sendSuccess(res, { room }, 201);
@@ -533,78 +627,78 @@ export class CollabServer {
       }
 
       if (method === 'POST' && pathname === '/api/invites/redeem') {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const body = await readJsonBody(req);
-        const result = this.roomService.redeemInviteCode(user, body);
+        const result = await this.roomService.redeemInviteCode(user, body);
         sendSuccess(res, result, 200);
         return;
       }
 
       const respondInviteMatch = /^\/api\/invites\/([^/]+)\/respond$/.exec(pathname);
       if (method === 'POST' && respondInviteMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const inviteId = decodeURIComponent(respondInviteMatch[1]);
         const body = await readJsonBody(req);
-        const result = this.roomService.respondToInvite(user, inviteId, body);
+        const result = await this.roomService.respondToInvite(user, inviteId, body);
         sendSuccess(res, result, 200);
         return;
       }
 
       const roomLeaveMatch = /^\/api\/rooms\/([^/]+)\/leave$/.exec(pathname);
       if (method === 'POST' && roomLeaveMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(roomLeaveMatch[1]);
-        const result = this.roomService.leaveRoom(user, roomId);
+        const result = await this.roomService.leaveRoom(user, roomId);
         sendSuccess(res, result, 200);
         return;
       }
 
       const transferOwnerMatch = /^\/api\/rooms\/([^/]+)\/transfer-ownership$/.exec(pathname);
       if (method === 'POST' && transferOwnerMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(transferOwnerMatch[1]);
         const body = await readJsonBody(req);
-        const room = this.roomService.transferOwnership(user, roomId, body);
+        const room = await this.roomService.transferOwnership(user, roomId, body);
         sendSuccess(res, { room }, 200);
         return;
       }
 
       const directInviteMatch = /^\/api\/rooms\/([^/]+)\/invites$/.exec(pathname);
       if (method === 'POST' && directInviteMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(directInviteMatch[1]);
         const body = await readJsonBody(req);
-        const invite = this.roomService.createDirectInvite(user, roomId, body);
+        const invite = await this.roomService.createDirectInvite(user, roomId, body);
         sendSuccess(res, { invite }, 201);
         return;
       }
 
       const inviteCodeMatch = /^\/api\/rooms\/([^/]+)\/invite-codes$/.exec(pathname);
       if (method === 'POST' && inviteCodeMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(inviteCodeMatch[1]);
         const body = await readJsonBody(req);
-        const inviteCode = this.roomService.createInviteCode(user, roomId, body);
+        const inviteCode = await this.roomService.createInviteCode(user, roomId, body);
         sendSuccess(res, { inviteCode }, 201);
         return;
       }
 
       const revokeInviteMatch = /^\/api\/rooms\/([^/]+)\/invites\/([^/]+)$/.exec(pathname);
       if (method === 'DELETE' && revokeInviteMatch?.[1] && revokeInviteMatch?.[2]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(revokeInviteMatch[1]);
         const inviteId = decodeURIComponent(revokeInviteMatch[2]);
-        const result = this.roomService.revokeInvite(user, roomId, inviteId);
+        const result = await this.roomService.revokeInvite(user, roomId, inviteId);
         sendSuccess(res, result, 200);
         return;
       }
 
       const createJoinReqMatch = /^\/api\/rooms\/([^/]+)\/join-requests$/.exec(pathname);
       if (method === 'POST' && createJoinReqMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(createJoinReqMatch[1]);
         const body = await readJsonBody(req);
-        const joinRequest = this.roomService.createJoinRequest(user, roomId, body);
+        const joinRequest = await this.roomService.createJoinRequest(user, roomId, body);
         sendSuccess(res, { joinRequest }, 201);
         return;
       }
@@ -613,65 +707,65 @@ export class CollabServer {
         pathname,
       );
       if (method === 'POST' && reviewJoinReqMatch?.[1] && reviewJoinReqMatch?.[2]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(reviewJoinReqMatch[1]);
         const reqId = decodeURIComponent(reviewJoinReqMatch[2]);
         const body = await readJsonBody(req);
-        const joinRequest = this.roomService.reviewJoinRequest(user, roomId, reqId, body);
+        const joinRequest = await this.roomService.reviewJoinRequest(user, roomId, reqId, body);
         sendSuccess(res, { joinRequest }, 200);
         return;
       }
 
       const kickMemberMatch = /^\/api\/rooms\/([^/]+)\/members\/([^/]+)\/kick$/.exec(pathname);
       if (method === 'POST' && kickMemberMatch?.[1] && kickMemberMatch?.[2]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(kickMemberMatch[1]);
         const targetUserId = decodeURIComponent(kickMemberMatch[2]);
         const body = await readJsonBody(req);
-        const result = this.roomService.kickMember(user, roomId, targetUserId, body);
+        const result = await this.roomService.kickMember(user, roomId, targetUserId, body);
         sendSuccess(res, result, 200);
         return;
       }
 
       const banMemberMatch = /^\/api\/rooms\/([^/]+)\/members\/([^/]+)\/ban$/.exec(pathname);
       if (method === 'POST' && banMemberMatch?.[1] && banMemberMatch?.[2]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(banMemberMatch[1]);
         const targetUserId = decodeURIComponent(banMemberMatch[2]);
         const body = await readJsonBody(req);
-        const result = this.roomService.banMember(user, roomId, targetUserId, body);
+        const result = await this.roomService.banMember(user, roomId, targetUserId, body);
         sendSuccess(res, result, 200);
         return;
       }
 
       const unbanMemberMatch = /^\/api\/rooms\/([^/]+)\/bans\/([^/]+)$/.exec(pathname);
       if (method === 'DELETE' && unbanMemberMatch?.[1] && unbanMemberMatch?.[2]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(unbanMemberMatch[1]);
         const targetUserId = decodeURIComponent(unbanMemberMatch[2]);
-        const result = this.roomService.unbanMember(user, roomId, targetUserId);
+        const result = await this.roomService.unbanMember(user, roomId, targetUserId);
         sendSuccess(res, result, 200);
         return;
       }
 
       const changeMemberRoleMatch = /^\/api\/rooms\/([^/]+)\/members\/([^/]+)$/.exec(pathname);
       if (method === 'PATCH' && changeMemberRoleMatch?.[1] && changeMemberRoleMatch?.[2]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(changeMemberRoleMatch[1]);
         const targetUserId = decodeURIComponent(changeMemberRoleMatch[2]);
         const body = await readJsonBody(req);
-        const member = this.roomService.changeMemberRole(user, roomId, targetUserId, body);
+        const member = await this.roomService.changeMemberRole(user, roomId, targetUserId, body);
         sendSuccess(res, { member }, 200);
         return;
       }
 
       const roomAuditMatch = /^\/api\/rooms\/([^/]+)\/audit$/.exec(pathname);
       if (method === 'GET' && roomAuditMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(roomAuditMatch[1]);
         const rawLimit = url.searchParams.get('limit');
         const limit = rawLimit ? Number.parseInt(rawLimit, 10) : 100;
-        const entries = this.roomService.listRoomAuditLog(
+        const entries = await this.roomService.listRoomAuditLog(
           user,
           roomId,
           Number.isFinite(limit) ? limit : 100,
@@ -682,7 +776,7 @@ export class CollabServer {
 
       const roomExportMatch = /^\/api\/rooms\/([^/]+)\/export$/.exec(pathname);
       if (method === 'GET' && roomExportMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(roomExportMatch[1]);
         const query: Record<string, string> = {};
         const format = url.searchParams.get('format');
@@ -698,7 +792,7 @@ export class CollabServer {
 
       const roomRootMatch = /^\/api\/rooms\/([^/]+)$/.exec(pathname);
       if (roomRootMatch?.[1]) {
-        const user = this.authenticate(req);
+        const user = await this.authenticate(req);
         const roomId = decodeURIComponent(roomRootMatch[1]);
         if (method === 'GET') {
           const detail = await this.roomService.getRoom(user, roomId);
@@ -707,12 +801,12 @@ export class CollabServer {
         }
         if (method === 'PATCH') {
           const body = await readJsonBody(req);
-          const room = this.roomService.updateRoom(user, roomId, body);
+          const room = await this.roomService.updateRoom(user, roomId, body);
           sendSuccess(res, { room }, 200);
           return;
         }
         if (method === 'DELETE') {
-          const result = this.roomService.deleteRoom(user, roomId);
+          const result = await this.roomService.deleteRoom(user, roomId);
           sendSuccess(res, result, 200);
           return;
         }

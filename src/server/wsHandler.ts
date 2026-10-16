@@ -4,9 +4,9 @@ import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
 import { canRoomAction } from '../shared/collab/permissions.js';
 import { wsClientMessageSchema } from '../shared/collab/protocol.js';
-import type { UserProfile, WsServerMessage } from '../shared/collab/types.js';
+import { assignUserColor, type UserProfile, type WsServerMessage } from '../shared/collab/types.js';
 import type { AuthService } from './auth.js';
-import { CollabServiceError } from './db.js';
+import { CollabServiceError } from './errors.js';
 import type { RoomRuntime, RoomRuntimeManager } from './roomRuntime.js';
 import type { RoomService } from './rooms.js';
 
@@ -89,7 +89,7 @@ export class CollabWsHandler {
   ): Promise<void> {
     let user: UserProfile;
     try {
-      user = this.deps.authService.authenticateToken(token);
+      user = await this.deps.authService.authenticateToken(token);
     } catch (error) {
       const msg = error instanceof Error ? error.message : 'Unauthorized';
       ws.close(WS_CLOSE_UNAUTHORIZED, msg.slice(0, 120));
@@ -98,7 +98,7 @@ export class CollabWsHandler {
 
     // Verify room existence, ban status, and room membership before attaching to runtime
     try {
-      this.deps.roomService.getRoomSummary(roomId, user.id);
+      await this.deps.roomService.getRoomSummary(roomId, user.id);
     } catch (error) {
       if (error instanceof CollabServiceError && error.code === 'NOT_FOUND') {
         ws.close(WS_CLOSE_NOT_FOUND, error.message.slice(0, 120));
@@ -108,12 +108,12 @@ export class CollabWsHandler {
       return;
     }
 
-    if (this.deps.roomService.isUserBanned(roomId, user.id)) {
+    if (await this.deps.roomService.isUserBanned(roomId, user.id)) {
       ws.close(WS_CLOSE_FORBIDDEN, 'You are banned from this room.');
       return;
     }
 
-    const role = this.deps.roomService.getMemberRole(roomId, user.id);
+    const role = await this.deps.roomService.getMemberRole(roomId, user.id);
     if (!canRoomAction(role, 'room:connect-ws', { isBanned: false }) || role === null) {
       ws.close(WS_CLOSE_FORBIDDEN, 'You are not a member of this room.');
       return;
@@ -180,6 +180,9 @@ export class CollabWsHandler {
       runtime.addClient({
         connectionId,
         user,
+        role,
+        color: assignUserColor(user.id),
+        presence: null,
         send: sendServerMessage,
         close: closeSocket,
       });

@@ -82,6 +82,39 @@ Once prepared, tests, builds and the app work locally without downloading runtim
 
 Application settings are written to `$XDG_CONFIG_HOME/hlr-writing-tool/config.ini` (default `~/.config/hlr-writing-tool/config.ini`) on Linux and `%APPDATA%\hlr-writing-tool\config.ini` on Windows. Invalid settings are reported at startup rather than overwritten. No fonts, scripts, icons or styles are loaded from a CDN; the interface uses system fonts.
 
+## Collaboration Server & PostgreSQL
+
+The server component (`npm run server`) provides multi-user real-time room collaboration. Server storage is backed by PostgreSQL using pure-JavaScript `pg` (no native C++ build steps required). Client-side desktop storage remains local SQLite via `better-sqlite3`.
+
+### Server Configuration Flags & Environment Variables
+
+| CLI Flag | Environment Variable | Default | Description |
+|---|---|---|---|
+| `--database-url <url>` | `HLR_DATABASE_URL` / `DATABASE_URL` | *(required)* | PostgreSQL connection string |
+| `--db-pool <count>` | `HLR_DB_POOL` | `10` | Maximum connection pool size |
+| `--migrate-only` | `HLR_MIGRATE_ONLY=1` | `false` | Run advisory-locked database migrations and exit |
+| `--host <host>` | `HLR_SERVER_HOST` | `0.0.0.0` | Bind host address |
+| `--port <port>` | `HLR_SERVER_PORT` | `8443` | Bind port number (`0` for ephemeral) |
+| `--insecure-http` | `HLR_SERVER_INSECURE_HTTP=1` | `false` | Use plain HTTP/WS instead of HTTPS/WSS |
+| `--name <name>` | `HLR_SERVER_NAME` | `HLR Collaboration Server` | Server display name in discovery |
+| `--data-dir <dir>` | `HLR_SERVER_DATA_DIR` | `.hlr-server-data` | Directory for TLS certificates |
+| `--setup-token <tok>` | `HLR_SERVER_SETUP_TOKEN` | *(random)* | Initial setup token for first SERVER_OWNER claim |
+| `--registration-mode` | `HLR_SERVER_REGISTRATION_MODE` | `open` | `open`, `approval`, or `closed` |
+| `--room-creation-mode` | `HLR_SERVER_ROOM_CREATION_MODE` | `all_users` | `all_users` or `admins_only` |
+| `--no-discovery` | `HLR_SERVER_NO_DISCOVERY=1` | `false` | Disable UDP LAN discovery broadcaster |
+| `--discovery-port <p>` | `HLR_SERVER_DISCOVERY_PORT` | `41234` | UDP discovery broadcast target port |
+
+### Test Prerequisites
+
+When running `npm test`:
+- `scripts/run-tests.mjs` automatically invokes `scripts/test-db.mjs` to spawn a disposable `postgres:16-alpine` Docker container on a dynamic port. Each test suite runs in its own isolated PostgreSQL schema with advisory locks and cleans up after itself.
+- If Docker is not available in your environment, export `HLR_TEST_DATABASE_URL` pointing to any accessible PostgreSQL 16+ instance:
+  ```sh
+  export HLR_TEST_DATABASE_URL=postgres://postgres:password@localhost:5432/postgres
+  npm test
+  ```
+  The test helper creates uniquely named schemas (e.g. `test_...`) and drops them on completion without altering other databases.
+
 Linux packaged execution is verified. Windows cross-builds and target-specific offline bundles are prepared here, but their execution and installation must be checked on a Windows x64 desktop.
 
 ## Core API example

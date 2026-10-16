@@ -130,3 +130,33 @@
 - Server op engine in R02 will implement the per-room serial queue (`enqueueOp`), append to `room_ops` before broadcasting `op-applied` and acknowledging with `op-ack`, handle idempotent re-submission via `opId`, and implement catch-up via `ops-since` / `snapshot`.
 - `WorkspaceIndex.rebuild(root, input)` in `src/main/db/sqliteClient.ts` is static and should be called directly followed by `index.close()`.
 - All tests pass (`npm run typecheck`, `npm test` with 92/92 tests green and 100% domain coverage, `npm run build` succeeds).
+
+## R02 Move server storage to PostgreSQL (store interface, migrations, async services)
+
+### What Changed
+- Installed pure-JS `pg@8.23.1` and `@types/pg@8.23.1` using `--ignore-scripts --save-exact` and updated `offline/cache/npm`. Client-side SQLite (`src/main/db`, `better-sqlite3`) remains untouched.
+- Created `src/server/errors.ts`: Extracted `CollabServiceError` and `API_ERROR_HTTP_STATUS` into a standalone error module with zero SQLite dependencies.
+- Created `src/server/store/types.ts`: Defined `ServerStore` interface, row models, and 12 asynchronous repositories (`users`, `sessions`, `serverSettings`, `rooms`, `memberships`, `invites`, `joinRequests`, `bans`, `audit`, `ops`, `snapshots`, `revisions`) with support for nested transactions.
+- Created `src/server/store/migrations/0001_init.sql`: Full DDL covering `schema_migrations`, tables, foreign key constraints, timestamps, indexes (including lower(username) case-insensitive unique index), covering all server state plus `room_ops`, `room_snapshots`, and `revisions`.
+- Created `src/server/store/migrator.ts`: Pure-JS/TS migration runner guarded by PostgreSQL advisory lock `pg_advisory_lock(8473927492837482n)` and tracking `schema_migrations`.
+- Created `src/server/store/pgStore.ts`: Complete `PgServerStore` implementation connecting via `pg.Pool` or within a client transaction, mapping rows safely, and providing all repository methods with parameterized SQL.
+- Created `src/server/store/index.ts`: Unified re-exports for store, types, migrations, and migrator.
+- Converted server services to asynchronous and store-backed:
+  - `src/server/auth.ts`: Converted `AuthService` to async and backed by `ServerStore`.
+  - `src/server/rooms.ts`: Converted `RoomService` to async and backed by `ServerStore`. Removed server-side workspace JSON files on disk in favor of DB snapshots (`room_snapshots`).
+  - `src/server/roomRuntime.ts` & `src/server/wsHandler.ts`: Converted `RoomRuntime` and `RoomRuntimeManager` to async and backed by `ServerStore`.
+  - `src/server/httpServer.ts`: Converted `CollabServer` to async lifecycle, connecting to PostgreSQL, applying migrations, and serving REST and WebSocket endpoints.
+  - `src/server/index.ts`: Added CLI arguments `--database-url`/`HLR_DATABASE_URL`, `--db-pool`/`HLR_DB_POOL`, and `--migrate-only`/`HLR_MIGRATE_ONLY`.
+- Deleted `src/server/db.ts`: Verified `grep -rn "better-sqlite3\|server.sqlite" src/server` is completely empty.
+- Created `scripts/test-db.mjs` and `tests/unit/testDbHelper.ts`: Spawns disposable `postgres:16-alpine` Docker container on a dynamic port or reuses `HLR_TEST_DATABASE_URL`. Provides isolated PostgreSQL schemas (`search_path`) per test suite with automatic drop-schema cleanup.
+- Added comprehensive unit tests in `tests/unit/pgStore.test.ts` (10 tests) covering migrations idempotency, concurrent advisory lock mutual exclusion, transaction commit/rollback, and every repository method.
+- Ported `tests/unit/serverAuth.test.ts`, `tests/unit/serverRooms.test.ts`, and `tests/unit/roomRuntime.test.ts` to async `ServerStore` against PostgreSQL with isolated schemas.
+- Wired `scripts/run-tests.mjs` to automatically ensure a PostgreSQL test container before launching vitest.
+- Updated `README.md` to document collaboration server configuration flags and PostgreSQL test prerequisites.
+- Verified all 15 test files and 102 tests pass, `npm run typecheck`, `npm test`, and `npm run build` succeed with green coverage.
+
+### Decisions Made & Notes for Next Agent (R03)
+- In `testDbHelper.ts`, `createTestStore()` sets the schema search path via the pool's connection options (`options: -c search_path="${schema}",public`), guaranteeing clean schema isolation across concurrent test runners.
+- `RoomService` now persists workspace snapshots in PostgreSQL (`room_snapshots`) and tracks sequence numbers in `rooms.head_seq` and `rooms.snapshot_seq`. Disk-based workspace JSON is no longer created on the server.
+- The server op engine in R03 will implement per-room serial queue ordering, append to `room_ops` before broadcasting `op-applied` and acknowledging with `op-ack`, handle idempotent re-submission via `opId`, and implement catch-up via `ops-since` / `snapshot`.
+
