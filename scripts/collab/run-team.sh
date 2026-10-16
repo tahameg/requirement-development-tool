@@ -6,6 +6,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 MODEL="${AGY_MODEL:-gemini-4-argon-high}"
+REVIEW_MODEL="${AGY_REVIEW_MODEL:-$MODEL}"
 MAX_TASK_RUNS="${MAX_TASK_RUNS:-30}"
 LOG_DIR="$ROOT/.collab-logs"
 STATUS="$LOG_DIR/STATUS.txt"
@@ -13,15 +14,17 @@ mkdir -p "$LOG_DIR"
 
 log() { echo "[$(date '+%F %T')] $*" | tee -a "$STATUS"; }
 
-run_agent() { # $1=name $2=role file
-  local name="$1" role="$2" out="$LOG_DIR/$1.log" rc attempt
+run_agent() { # $1=name $2=role file [$3=model]
+  local name="$1" role="$2" model="${3:-$MODEL}" out="$LOG_DIR/$1.log" rc attempt
   for attempt in 1 2 3 4 5; do
     log "start $name (attempt $attempt)"
     agy -p "Read and follow the instructions in $role exactly. Work in this repository: $ROOT" \
-      --model "$MODEL" --dangerously-skip-permissions --print-timeout 0 >"$out" 2>&1
+      --model "$model" --dangerously-skip-permissions --print-timeout 0 >"$out" 2>&1
     rc=$?
     log "end $name rc=$rc (log: $out)"
     [[ $rc -eq 0 ]] && return 0
+    # A long quota lockout will not clear by retrying.
+    grep -q "quota reached" "$out" && { log "STOP: quota exhausted for $model"; return $rc; }
     # Retry only transient service errors; anything else is a real failure.
     grep -qE 'UNAVAILABLE|503|429|RESOURCE_EXHAUSTED|DEADLINE|timeout|ECONNRESET' "$out" || return $rc
     cp "$out" "$out.attempt$attempt"
@@ -54,5 +57,5 @@ for ((i = 1; i <= MAX_TASK_RUNS; i++)); do
   fi
 done
 
-run_agent reviewer docs/collab/roles/reviewer.md
+run_agent reviewer docs/collab/roles/reviewer.md "$REVIEW_MODEL"
 log "DONE. open tasks: $(open_tasks). commits: $(git rev-list --count master..HEAD)"
