@@ -39,3 +39,18 @@
 - `ServerDatabase.open(dataDirOrDbPath, options?)` accepts `:memory:`, a `.sqlite`/`.db` file path, or a server `dataDir` directory path (storing `<dataDir>/server.sqlite` and exposing `serverDb.dataDir` for room workspaces and revisions).
 - `CollabServiceError` (`code: ApiErrorCode`, `status: number`, `message: string`) is exported from `src/server/db.ts` (and re-exported from `src/server/auth.ts`); `RoomService` (T04), `RoomRuntime` / `CollabServer` (T05), and `RevisionService` (T11) should throw `CollabServiceError` so the HTTP router can map errors directly to `{ ok: false, code, error }` with `err.status`.
 - `AuthService` accepts `{ sessionTtlMs?, initialSetupToken?, now? }` for deterministic clock/token testing and exposes `getInitialSetupToken()` so the server CLI (`src/server/index.ts`) can print the one-time setup token on first boot when `isSetupRequired()` is `true`.
+
+## T04 Implement rooms, memberships, invites, join requests, and audit logging service
+
+### What Changed
+- Created `src/server/rooms.ts` implementing `RoomService`:
+  - Room creation (`createRoom`) supporting fresh project initialization via `createWorkspace` and imported `Workspace` validation via `validateWorkspace`, persisted on disk under `<dataDir>/rooms/<roomId>/workspace/` via `saveWorkspace`.
+  - Room lobby & detail queries (`listRoomsForUser`, `getRoom`, `getRoomSummary`, `listRoomMembers`, `listRoomInvites`, `listRoomJoinRequests`, `listRoomBans`), metadata editing (`updateRoom`), deletion (`deleteRoom`), leaving (`leaveRoom`), and ownership transfer (`transferOwnership`).
+  - Direct user invitations (`createDirectInvite`, `respondToInvite`) and shareable invite codes (`createInviteCode`, `redeemInviteCode`, `revokeInvite`) enforcing role limits, expiration timestamps (`expiresAt`), and maximum redemption counts (`maxUses`).
+  - Join requests on `listed` rooms (`createJoinRequest`, `reviewJoinRequest` with approval role assignment or rejection).
+  - Member role changes (`changeMemberRole` enforcing `ROOM_ADMIN` vs `ROOM_OWNER` rules), kicking (`kickMember`), banning/unbanning (`banMember`, `unbanMember`), room workspace export (`exportRoom` for `json`, `csv`, and `markdown`), room audit log retrieval (`listRoomAuditLog`), and server-admin room oversight (`listAllRoomsAdmin`, `resolveStuckRoom`).
+- Added unit test suite `tests/unit/serverRooms.test.ts` verifying all room lifecycle flows, permissions, invite/join-request workflows, bans, ownership transfers, and audit log entries.
+
+### Decisions Made & Notes for Next Agent
+- `RoomService.setRuntimeHooks({ getOnlineUserIds, getWorkspaceProvider, onRoomEvent })` allows `RoomRuntime` / `wsHandler` / `CollabServer` (T05) to wire live online member counts, live in-memory `Y.Doc` workspace snapshots for `getRoom` and `exportRoom`, and real-time WebSocket notifications for room membership/role/join-request events (`RoomLifecycleEvent`).
+- `RoomService.getRoomDir(roomId)`, `getRoomWorkspaceDir(roomId)`, `getRoomRevisionsDir(roomId)`, `loadRoomWorkspace(roomId)`, `saveRoomWorkspace(roomId, workspace)`, and `recordAutosave(roomId, autosavedAt?)` are exposed for `RoomRuntime` (T05) and `RevisionService` (T11).
