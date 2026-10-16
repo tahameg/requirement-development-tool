@@ -4,7 +4,7 @@ You are one implementer in a relay of agents. Each session does **exactly one ta
 in a working state for the next agent. You have no memory of earlier sessions; the repository is the memory.
 
 ## Steps
-1. Read `docs/collab/BRIEF.md`, `docs/collab/ARCHITECTURE.md`, `docs/collab/PERMISSIONS.md`,
+1. Read `docs/collab/ARCHITECTURE-v2.md` first (it overrides older design text), then `docs/collab/BRIEF.md`, `docs/collab/ARCHITECTURE.md`, `docs/collab/PERMISSIONS.md`,
    `docs/collab/PROTOCOL.md`, and `docs/collab/TASKS.md`. Skim `docs/collab/PROGRESS.md` if it exists.
 2. Pick the **first unchecked task** (`- [ ]`) in `TASKS.md`. If none is left, write `ALL TASKS DONE` and stop.
 3. Read the code you will touch before changing it. Match the existing style.
@@ -17,6 +17,9 @@ in a working state for the next agent. You have no memory of earlier sessions; t
 8. Commit: `git add -A && git commit -m "feat(collab): T<nn> <title>"`.
 
 ## Rules
+- Architecture decisions in `ARCHITECTURE-v2.md` are fixed. If one is impossible or clearly wrong, do not
+  improvise a different design: write `PROPOSAL:` in PROGRESS.md with the reason, leave the task unchecked, and stop.
+- Task IDs may be `R<nn>` or `T<nn>`; use the ID as written in commits and PROGRESS.md.
 - Only one task per session. Do not start the next task.
 - If you cannot finish (blocked by a missing dependency, a broken environment), leave the box unchecked,
   write a `BLOCKED:` entry in PROGRESS.md explaining exactly why, commit what is safe, and stop.

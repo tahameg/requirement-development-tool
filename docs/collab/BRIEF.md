@@ -33,6 +33,9 @@ Update `Agents.md` when the design is final so both stay consistent.
 
 ## 2. Decisions already made (do not re-litigate, refine only)
 
+> **Superseded in part (2026-10-16):** live sync, field highlight, ID allocation and in-room offline editing now
+> follow `docs/collab/ARCHITECTURE-v2.md` (server-ordered op queue + edit locks, no Yjs). That file wins.
+
 | Topic | Decision |
 |---|---|
 | Server runtime | Node.js headless process in this repo (`src/server/`), started with `npm run server`, also shippable as a standalone offline bundle / systemd service / the existing Dockerfile. Shared domain code reused from `src/shared` and `src/main/services`. |
@@ -81,8 +84,8 @@ workspace into it, or export it back to a local workspace.
 - In room: member list with online state and avatar color, who is viewing which function (avatars on tree nodes
   and in the editor header), live tree updates, live table updates, field highlights with name tags,
   notifications (join requests, role changes, revision saved, user joined/left).
-- Connection state indicator: connected / reconnecting / offline. On temporary disconnect the client keeps
-  editing locally (Yjs + local persistence) and syncs on reconnect. Permission loss while offline is handled by
+- Connection state indicator: connected / reconnecting / offline. On temporary disconnect the room becomes
+  read-only and the unsent draft is preserved (see ARCHITECTURE-v2 section 8). Permission loss while offline is handled by
   server rejection on reconnect with a clear message.
 - Conflicts on structural operations (e.g. editing inside a module another user deleted) must resolve
   deterministically and be explained to the user.
