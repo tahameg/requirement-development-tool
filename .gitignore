@@ -27,3 +27,4 @@ offline/native/**/*.node
 Thumbs.db
 .vscode/
 .idea/
+.collab-logs/
