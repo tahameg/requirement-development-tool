@@ -1,6 +1,7 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
+  DEFAULT_DISCOVERY_PORT,
   DEFAULT_SERVER_PORT,
   REGISTRATION_MODES,
   ROOM_CREATION_MODES,
@@ -11,6 +12,14 @@ import { CollabServer, type CollabServerOptions } from './httpServer.js';
 
 export { AuthService, CollabServiceError } from './auth.js';
 export { ServerDatabase } from './db.js';
+export {
+  DiscoveryBroadcaster,
+  buildDiscoveryBeacon,
+  serializeDiscoveryBeacon,
+  resolveAdvertiseHost,
+  type DiscoveryBeaconInfo,
+  type DiscoveryBroadcasterOptions,
+} from './discovery.js';
 export { CollabServer, type CollabServerListenInfo, type CollabServerOptions } from './httpServer.js';
 export { RoomRuntime, RoomRuntimeManager, type RoomRuntimeOptions } from './roomRuntime.js';
 export { RoomService, type RoomLifecycleEvent, type RoomServiceOptions } from './rooms.js';
@@ -46,6 +55,15 @@ export function parseServerCliArgs(
   let registrationMode = env.HLR_SERVER_REGISTRATION_MODE?.trim() as RegistrationMode | undefined;
   let roomCreationMode = env.HLR_SERVER_ROOM_CREATION_MODE?.trim() as RoomCreationMode | undefined;
   let initialSetupToken = env.HLR_SERVER_SETUP_TOKEN?.trim() || undefined;
+  let discovery =
+    env.HLR_SERVER_NO_DISCOVERY === '1' || env.HLR_SERVER_NO_DISCOVERY === 'true'
+      ? false
+      : env.HLR_SERVER_DISCOVERY === '0' || env.HLR_SERVER_DISCOVERY === 'false'
+        ? false
+        : true;
+  let discoveryPort = env.HLR_SERVER_DISCOVERY_PORT
+    ? Number.parseInt(env.HLR_SERVER_DISCOVERY_PORT, 10)
+    : undefined;
   let help = false;
 
   for (let i = 0; i < argv.length; i += 1) {
@@ -54,6 +72,12 @@ export function parseServerCliArgs(
       help = true;
     } else if (arg === '--insecure-http') {
       insecureHttp = true;
+    } else if (arg === '--no-discovery') {
+      discovery = false;
+    } else if (arg === '--discovery-port' && argv[i + 1]) {
+      discoveryPort = Number.parseInt(argv[++i]!, 10);
+    } else if (arg.startsWith('--discovery-port=')) {
+      discoveryPort = Number.parseInt(arg.slice('--discovery-port='.length), 10);
     } else if (arg === '--data-dir' && argv[i + 1]) {
       dataDir = path.resolve(argv[++i]!);
     } else if (arg.startsWith('--data-dir=')) {
@@ -90,6 +114,13 @@ export function parseServerCliArgs(
   }
 
   if (
+    discoveryPort !== undefined &&
+    (!Number.isInteger(discoveryPort) || discoveryPort < 1 || discoveryPort > 65535)
+  ) {
+    throw new Error(`Invalid discovery port: ${String(discoveryPort)}`);
+  }
+
+  if (
     registrationMode !== undefined &&
     !(REGISTRATION_MODES as readonly string[]).includes(registrationMode)
   ) {
@@ -112,6 +143,8 @@ export function parseServerCliArgs(
     registrationMode,
     roomCreationMode,
     initialSetupToken,
+    discovery,
+    discoveryPort,
     help,
   };
 }
@@ -131,6 +164,8 @@ export function formatServerHelpText(): string {
     '  --room-creation-mode <all_users|admins_only> Room creation policy',
     '  --setup-token <token>                     Explicit initial SERVER_OWNER setup token',
     '  --insecure-http                           Disable TLS (plain HTTP/WS for testing only)',
+    `  --discovery-port <port>                   UDP LAN discovery broadcast port (default: ${DEFAULT_DISCOVERY_PORT})`,
+    '  --no-discovery                            Disable UDP LAN discovery broadcaster',
     '  -h, --help                                Show this help message',
   ].join('\n');
 }
@@ -159,6 +194,11 @@ export async function startServerFromCli(
     log(`TLS SHA-256 : ${info.fingerprint}`);
   } else {
     log(`TLS         : DISABLED (--insecure-http)`);
+  }
+  if (info.discoveryPort) {
+    log(`Discovery   : UDP port ${info.discoveryPort} (broadcast)`);
+  } else {
+    log(`Discovery   : DISABLED (--no-discovery)`);
   }
   if (info.setupToken) {
     log('------------------------------------------------------------');

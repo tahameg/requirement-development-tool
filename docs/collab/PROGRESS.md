@@ -74,3 +74,33 @@
 - When `RoomRuntime.initialize()` recovers a room that has rows in `yjs_updates`, it applies those stored updates directly to the fresh `this.ydoc` (because compaction always retains a full-state snapshot as the base row in `yjs_updates`) rather than calling `workspaceToYDoc` first, which would otherwise create new root `Y.Map` instances with a different `clientID`.
 - When a client receives a corrective `sync-step2` after an update rejection (`FORBIDDEN` / `CONFLICT` / `VALIDATION_ERROR`), calling `resetYDocToServerState(doc, Buffer.from(msg.updateBase64, 'base64'))` from `src/shared/collab/yjsDoc.ts` cleanly reverts unaccepted local Yjs operations in-place on the existing `Y.Doc` instance.
 - `CollabServer` exposes `getPort()`, `getHost()`, `getProtocol()`, `getBaseUrl()`, `getWsBaseUrl()`, `getTlsInfo()`, `db`, `auth`, `rooms`, `runtimeManager`, and `wsHandler` so `DiscoveryBroadcaster` (T06), `CollabClient` (T07/T12), and `RevisionService` (T11) can integrate cleanly.
+
+## T06 Implement UDP LAN discovery broadcaster and client listener
+
+### What Changed
+- Created `src/server/discovery.ts` implementing `DiscoveryBroadcaster`:
+  - Broadcasts `{ magic: 'HLR_SERVER_BEACON_V1', serverId, name, version, host, port, tls, fingerprint, timestamp }` over IPv4 UDP to broadcast targets (`255.255.255.255` and `127.0.0.1`, default port `41234`).
+  - Resolves advertised host (`resolveAdvertiseHost`) using non-internal IPv4 interfaces when bound to `0.0.0.0`, falling back to `127.0.0.1`.
+  - Enforces 512-byte beacon size limit (`buildDiscoveryBeacon` and `serializeDiscoveryBeacon`), truncating long server display names if needed and ensuring `fingerprint` is `null` when `tls: false`.
+- Integrated `DiscoveryBroadcaster` into `CollabServer` (`src/server/httpServer.ts`):
+  - Added `discovery?: boolean`, `discoveryPort?: number`, `discoveryTargets?: readonly string[]`, and `discoveryIntervalMs?: number` to `CollabServerOptions`.
+  - Automatically initializes, starts, and stops `discoveryBroadcaster` with `CollabServer.start()` and `CollabServer.stop()` unless `discovery: false` is configured.
+  - Exposed `discoveryPort: number | null` on `CollabServerListenInfo` and `discoveryBroadcaster` on `CollabServer`.
+- Updated `src/server/index.ts`:
+  - Re-exported `DiscoveryBroadcaster`, `buildDiscoveryBeacon`, `serializeDiscoveryBeacon`, and `resolveAdvertiseHost`.
+  - Added `--discovery-port <port>` and `--no-discovery` CLI argument parsing, environment variable support (`HLR_SERVER_DISCOVERY_PORT`, `HLR_SERVER_NO_DISCOVERY`), help text documentation, and discovery port status in startup console logs.
+- Created `src/main/collab/discoveryClient.ts` implementing `DiscoveryClient`:
+  - Listens for UDP beacons on default port `41234` or custom/ephemeral port (e.g. port `0`).
+  - Validates incoming packets with Zod (`discoveryBeaconSchema`), silently discarding malformed JSON, oversized buffers (> 1024 bytes), wrong magic, or schema mismatches.
+  - Resolves advertised host (falling back to remote sender address if loopback/wildcard on LAN).
+  - Deduplicates discovered servers in a Map keyed by `serverId`.
+  - Tracks `online: boolean` state, marking servers offline after `10s` (`DISCOVERY_STALE_MS` / `staleThresholdMs`) and reviving them upon subsequent beacon reception.
+  - Emits typed events (`servers`, `server-discovered`, `server-updated`, `server-stale`) and provides `getServers()`, `getServer()`, `checkStale()`, `clear()`, `removeServer()`, and `onServersChange()`.
+  - Binds with `reuseAddr: true` so multiple client processes can bind without `EADDRINUSE`.
+- Added test suite `tests/unit/discovery.test.ts` (17 tests) covering beacon construction, size enforcement, packet filtering, ephemeral port localhost UDP broadcast and reception, deduplication, stale server tracking/revival, CollabServer lifecycle integration, CLI flag parsing, and options validation.
+
+### Decisions Made & Notes for Next Agent
+- `DiscoveryClient` accepts `port: 0` to bind to an OS-assigned ephemeral port (`client.getPort()`), allowing integration tests to run with complete isolation and zero port conflicts.
+- `CollabServerOptions` defaults `discovery: true` and `discoveryPort: 41234`, targeting both `255.255.255.255` (LAN broadcast) and `127.0.0.1` (loopback) every `3000ms`. In tests or non-discovery scenarios, pass `discovery: false` or `--no-discovery`.
+- `DiscoveryClient.getServers()` returns a sorted list (`online` servers first, then sorted by `lastSeenAt` descending, then by name) with `online` state dynamically checked against `now()`. Call `client.checkStale()` to check and fire `'server-stale'` events.
+- For T07 (`CollabClient` and `DesktopService`), `DiscoveryClient` is ready to be instantiated in the Electron main process and exposed via `DesktopService` IPC methods for discovered server list queries and push notifications to the renderer.

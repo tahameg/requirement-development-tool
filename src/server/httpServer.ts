@@ -2,6 +2,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import {
+  DEFAULT_DISCOVERY_PORT,
   DEFAULT_SERVER_PORT,
   type ApiErrorCode,
   type RegistrationMode,
@@ -11,6 +12,7 @@ import {
 } from '../shared/collab/types.js';
 import { AuthService } from './auth.js';
 import { CollabServiceError, ServerDatabase } from './db.js';
+import { DiscoveryBroadcaster } from './discovery.js';
 import { RoomRuntimeManager } from './roomRuntime.js';
 import { RoomService } from './rooms.js';
 import {
@@ -37,6 +39,10 @@ export interface CollabServerOptions {
   autosaveDebounceMs?: number;
   autosaveMaxWaitMs?: number;
   tlsOptions?: GenerateTlsCertOptions;
+  discovery?: boolean;
+  discoveryPort?: number;
+  discoveryTargets?: readonly string[];
+  discoveryIntervalMs?: number;
   now?: () => Date;
 }
 
@@ -51,6 +57,7 @@ export interface CollabServerListenInfo {
   fingerprint: string | null;
   setupToken: string | null;
   serverId: string;
+  discoveryPort: number | null;
 }
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -143,6 +150,7 @@ export class CollabServer {
   readonly tlsBundle: TlsCertificateBundle | null;
   readonly insecureHttp: boolean;
   readonly version: string;
+  readonly discoveryBroadcaster: DiscoveryBroadcaster | null;
 
   private readonly host: string;
   private readonly requestedPort: number;
@@ -191,6 +199,27 @@ export class CollabServer {
       roomService: this.roomService,
       runtimeManager: this.runtimeManager,
     });
+
+    this.discoveryBroadcaster =
+      options.discovery === false
+        ? null
+        : new DiscoveryBroadcaster({
+            getBeaconInfo: () => {
+              const settings = this.authService.getServerSettings();
+              return {
+                serverId: settings.serverId,
+                name: settings.name,
+                version: this.version,
+                host: this.host,
+                port: this.getPort(),
+                tls: !this.insecureHttp,
+                fingerprint: this.getFingerprint(),
+              };
+            },
+            discoveryPort: options.discoveryPort ?? DEFAULT_DISCOVERY_PORT,
+            intervalMs: options.discoveryIntervalMs,
+            targets: options.discoveryTargets,
+          });
   }
 
   getPort(): number {
@@ -234,6 +263,7 @@ export class CollabServer {
       fingerprint: this.getFingerprint(),
       setupToken: this.getSetupToken(),
       serverId: settings.serverId,
+      discoveryPort: this.discoveryBroadcaster ? this.discoveryBroadcaster.getDiscoveryPort() : null,
     };
   }
 
@@ -279,10 +309,18 @@ export class CollabServer {
       server.listen(this.requestedPort, this.host);
     });
 
+    if (this.discoveryBroadcaster) {
+      await this.discoveryBroadcaster.start();
+    }
+
     return this.getListenInfo();
   }
 
   async stop(): Promise<void> {
+    if (this.discoveryBroadcaster) {
+      await this.discoveryBroadcaster.stop();
+    }
+
     await this.runtimeManager.closeAll();
     this.wsHandler.closeAll();
 
