@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type pg from 'pg';
@@ -10,8 +10,22 @@ export interface MigrationFile {
   sql: string;
 }
 
+export function resolveDefaultMigrationsDir(): string {
+  const currentDir = path.dirname(fileURLToPath(import.meta.url));
+  const candidateInCurrent = path.join(currentDir, 'migrations');
+  if (existsSync(candidateInCurrent)) {
+    return candidateInCurrent;
+  }
+  const root = path.resolve(currentDir, '..', '..', '..');
+  const candidateInSrc = path.join(root, 'src', 'server', 'store', 'migrations');
+  if (existsSync(candidateInSrc)) {
+    return candidateInSrc;
+  }
+  return candidateInCurrent;
+}
+
 export function loadMigrationFiles(migrationsDir?: string): MigrationFile[] {
-  const dir = migrationsDir ?? path.join(path.dirname(fileURLToPath(import.meta.url)), 'migrations');
+  const dir = migrationsDir ?? resolveDefaultMigrationsDir();
   const files = readdirSync(dir)
     .filter(f => f.endsWith('.sql'))
     .sort();

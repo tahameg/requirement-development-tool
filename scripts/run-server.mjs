@@ -1,33 +1,21 @@
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const serverEntry = path.join(rootDir, 'dist', 'server', 'index.js');
 
-if (!existsSync(serverEntry)) {
-  const tscBin = path.join(rootDir, 'node_modules', 'typescript', 'bin', 'tsc');
-  const buildResult = spawnSync(process.execPath, [tscBin], {
-    cwd: rootDir,
-    stdio: 'inherit',
-  });
-  if (buildResult.status !== 0) {
-    process.exit(buildResult.status ?? 1);
-  }
+// Source checkout: compile on each launch so the server never runs stale code.
+const tscBin = path.join(rootDir, 'node_modules', 'typescript', 'bin', 'tsc');
+if (existsSync(tscBin)) {
+  const result = spawnSync(process.execPath, [tscBin], { cwd: rootDir, stdio: 'inherit' });
+  if (result.status !== 0) process.exit(result.status ?? 1);
 }
-
-let runtimeExecutable = process.execPath;
-if (process.env.HLR_USE_SYSTEM_NODE !== '1') {
-  try {
-    const electronModule = await import('electron');
-    if (typeof electronModule.default === 'string' && existsSync(electronModule.default)) {
-      runtimeExecutable = electronModule.default;
-    }
-  } catch {
-    // Fall back to system Node executable
-  }
-}
+const distMigrations = path.join(rootDir, 'dist', 'server', 'store', 'migrations');
+const srcMigrations = path.join(rootDir, 'src', 'server', 'store', 'migrations');
+if (existsSync(srcMigrations)) { mkdirSync(distMigrations, { recursive: true }); cpSync(srcMigrations, distMigrations, { recursive: true }); }
+const runtimeExecutable = process.execPath;
 
 const child = spawn(runtimeExecutable, [serverEntry, ...process.argv.slice(2)], {
   cwd: rootDir,

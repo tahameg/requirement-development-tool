@@ -1,0 +1,17 @@
+[Unit]
+Description=HLR collaboration server
+After=network.target postgresql.service
+[Service]
+Type=simple
+User=hlr
+Group=hlr
+WorkingDirectory=/opt/hlr-server
+EnvironmentFile=/etc/hlr-server.env
+ExecStart=/opt/hlr-server/node/bin/node /opt/hlr-server/server.mjs
+Restart=on-failure
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/hlr-server
+[Install]
+WantedBy=multi-user.target

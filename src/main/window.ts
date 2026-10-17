@@ -1,4 +1,6 @@
-import { BrowserWindow, dialog } from 'electron';
+import { CollabClient } from './collab/collabClient.js';
+import { registerCollabHandlers } from './ipc/collabHandlers.js';
+import { app, BrowserWindow, dialog } from 'electron';
 import { existsSync } from 'node:fs';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import path from 'node:path';
@@ -23,12 +25,14 @@ export async function createDesktopWindow(service: DesktopService): Promise<Brow
   window.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   window.webContents.session.setPermissionCheckHandler(() => false);
   window.webContents.session.webRequest.onBeforeRequest((details, callback) => callback({ cancel: !details.url.startsWith('file:') && !details.url.startsWith('devtools:') }));
+  const collab = new CollabClient(app.getPath('userData'));
+  const unregisterCollab = registerCollabHandlers(window, collab, pathToFileURL(page).href);
   const unregister = registerHandlers(window, service, pathToFileURL(page).href);
   window.on('close', () => {
     const bounds = window.getNormalBounds();
     service.config.save({ ...service.config.get(), window: { width: Math.max(800, Math.min(7680, bounds.width)), height: Math.max(600, Math.min(4320, bounds.height)), maximized: window.isMaximized() } });
   });
-  window.on('closed', () => { unregister(); service.close(); });
+  window.on('closed', () => { unregister(); unregisterCollab(); service.close(); });
   await window.loadFile(page);
   if (settings.window.maximized) window.maximize();
   window.show();

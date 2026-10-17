@@ -18,7 +18,9 @@
     "package:appimage": "node scripts/package.mjs linux --target=AppImage",
     "package:deb": "node scripts/package.mjs linux --target=deb",
     "package:windows": "node scripts/package.mjs win32",
-    "package:dir": "node scripts/package.mjs linux --dir"
+    "package:dir": "node scripts/package.mjs linux --dir",
+    "bundle:server": "node scripts/bundle-server.mjs",
+    "test:collaboration": "electron tests/integration/collaboration-smoke.cjs"
   },
   "dependencies": {
     "better-sqlite3": "12.8.0",

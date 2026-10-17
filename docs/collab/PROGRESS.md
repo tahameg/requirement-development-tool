@@ -185,3 +185,28 @@
 - R04 is next: full lease lock manager and presence. T07–T10 connect the desktop client and collaboration UI. T11–T14 cover revisions, reconnect/drafts, offline deployment and full product end-to-end testing.
 - `room.restore` currently rejects explicitly rather than logging an unimplemented change; implementation belongs to T11.
 - Existing unrelated edits in package.json, build-preload.mjs, run-server.mjs and migrator.ts were preserved.
+
+
+## R04 and T07–T14: integrated collaboration (2026-10-17)
+
+The user explicitly requested completing all remaining tasks without stopping between them. These implementations follow ARCHITECTURE-v2; historical Yjs and server SQLite entries above describe the replaced design.
+
+### Delivered
+- Session-bound lease locks, heartbeat/expiry, disconnect grace, audited administrator release, creator locks, deletion cleanup and throttled presence. Viewer and cross-session lock bypasses are rejected by the server.
+- Main-process HTTPS/WSS client with certificate fingerprint verification before credentials, persistent server trust, discovery, authentication, ordered workspace mirror/catch-up, reconnect and narrowly validated IPC. Renderer network access remains denied; only main-process transport reaches the chosen server.
+- Desktop connection/setup/login/registration, room lobby, local-workspace room creation, invitations, join requests, account administration, members/roles, ownership transfer, bans, presence, live row/scope editing, node properties and locked project settings. Offline authoring remains available.
+- Debounced changed-field patches, explicit new-item commits, lock-holder indication and role gates. Fixed unresolved denied-lock promises, the public-server response envelope, unsupported Electron prompt dialogs and malformed WebSocket path handling.
+- Named PostgreSQL revisions, current-or-revision comparison, ordered restore, import/export, lock release on restore and ID/watermark safety. Migration 0002 allows multiple named revisions at the same operation sequence.
+- Atomic on-disk row/scope drafts with reconnect reconciliation, read-only disconnected views and explicit conflicts for changed/deleted rows or lost locks. Settings navigation cannot silently discard changes.
+- Standalone pure-JavaScript server bundle, adjacent migrations, checksum, systemd service, Docker/Compose assets and offline installation/backup guidance. The server launcher rebuilds source and ships all migrations. No server native SQLite dependency.
+
+### Verification
+- Typecheck, production build and standalone bundle generation passed.
+- Full `npm test`: 122 tests in 24 files passed against PostgreSQL 16.15. Protected ID/schema/validation modules retain 100% statement, branch, function and line coverage.
+- Real three-user HTTPS/WSS integration covers discovery, setup, registration, invitations, concurrent unique IDs, identical mirrors, lock denial, viewer restrictions, presence, revision restore, changed-row conflicts and server restart recovery. Additional deletion/rejoin assertion verifies unsent content survives a deleted row.
+- Transport tests cover certificate mismatch/retrust, short disconnect lock reclaim and automatic safe draft replay; storage tests cover draft persistence across process restarts. The standalone bundle test runs without node_modules and applies database migrations.
+- Real Electron collaboration smoke passed: TLS review, setup, room creation, live item add/edit and named revision saving. Renderer isolation/network denial checked; screenshot inspected. Existing desktop, hierarchy and authoring smoke tests all passed.
+- Test database was a temporary official PostgreSQL distribution extracted under /tmp; no production database or system installation was changed. Graphical tests needed the environment's `--no-sandbox` launch flag; renderer context isolation, sandboxed preload configuration and network restrictions were checked.
+
+### Deployment validation limits
+Docker execution was unavailable, so the supplied image/Compose setup was not run. Windows packaging/installation was not executed on this Linux host. The standalone server and migration bundle were exercised directly on Linux. These target-environment checks remain release validation, not claimed successes. Existing user edits to the desktop start flag, preload migration copying and migration lookup were preserved.

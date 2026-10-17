@@ -1,0 +1,13 @@
+import { build } from 'esbuild';
+import { mkdirSync, cpSync, writeFileSync, readFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
+import path from 'node:path';
+const destination = path.resolve(process.argv[2] || 'release/server');
+mkdirSync(destination, { recursive: true });
+await build({ entryPoints: ['src/server/index.ts'], bundle: true, platform: 'node', target: 'node20', format: 'esm', outfile: path.join(destination, 'server.mjs'), external: ['pg-native'], banner: { js: "import { createRequire } from 'node:module'; const require = createRequire(import.meta.url);" } });
+cpSync('src/server/store/migrations', path.join(destination, 'migrations'), { recursive: true });
+cpSync('docs/collab/DEPLOYMENT.md', path.join(destination, 'README.md'));
+cpSync('deploy/hlr-server.service', path.join(destination, 'hlr-server.service'));
+const hash = createHash('sha256').update(readFileSync(path.join(destination, 'server.mjs'))).digest('hex');
+writeFileSync(path.join(destination, 'server.mjs.sha256'), `${hash}  server.mjs\n`);
+console.log(`Standalone server bundle ready: ${destination}. Requires Node.js 20+ and PostgreSQL 16+; no npm install or native modules.`);

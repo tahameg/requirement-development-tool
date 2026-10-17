@@ -10,9 +10,12 @@ export class OpError extends Error {
 }
 
 /** Server-chosen identity and time are logged with the operation for deterministic replay. */
-export interface OpResult { createdId?: string; timestamp: string }
+export interface OpResult { createdId?: string; timestamp: string; workspace?: Workspace; revision?: import('../shared/collab/types.js').RevisionMetadata }
 export function applyWorkspaceOp(input: Workspace, op: CollabOp, result: OpResult = { timestamp: new Date().toISOString() }): { workspace: Workspace; result: OpResult } {
-  if (op.kind === 'room.restore') throw new OpError('VALIDATION', 'Revision restore is not implemented yet.');
+  if (op.kind === 'room.restore') {
+    if (!result.workspace) throw new OpError('VALIDATION', 'Restore snapshot is missing');
+    return { workspace: validateWorkspace(result.workspace), result };
+  }
   if (op.kind === 'config.update') return { workspace: updateProjectConfig(input, op.payload), result };
   if (op.kind === 'hierarchy') {
     const workspace = changeHierarchy(input, op.payload);

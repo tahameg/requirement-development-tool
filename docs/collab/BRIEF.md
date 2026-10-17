@@ -22,8 +22,7 @@ Update `Agents.md` when the design is final so both stay consistent.
 1. **Air-gapped.** Server and client must install and run with zero internet. Every new dependency must be
    pure JS or vendorable through the existing `offline/` bundle flow. No CDNs, no cloud services, no telemetry.
 2. **Offline-first is preserved.** With no server, the desktop app works exactly as today (local workspace).
-3. **Existing data format stays human-readable JSON** (`Agents.md` section 6). The server stores projects in the
-   same workspace format so a project can be exported/imported between local and server.
+3. **Existing data format stays human-readable JSON** (`Agents.md` section 6). The server stores workspace JSON snapshots and operations in PostgreSQL; import/export uses the same local workspace format.
 4. **ID immutability rules (`Agents.md` section 5) must hold under concurrency.** Two users must never get the same ID.
    ID allocation is server-authoritative in a room.
 5. Keep the existing security posture of the renderer (context isolation, sandbox, validated IPC, CSP).
@@ -40,14 +39,14 @@ Update `Agents.md` when the design is final so both stay consistent.
 |---|---|
 | Server runtime | Node.js headless process in this repo (`src/server/`), started with `npm run server`, also shippable as a standalone offline bundle / systemd service / the existing Dockerfile. Shared domain code reused from `src/shared` and `src/main/services`. |
 | Transport | WebSocket (`ws` package) over HTTP(S). REST (plain `node:http`, or a tiny router) for auth, rooms, admin. |
-| Live sync | **Yjs CRDT** per project document (`yjs`, `y-protocols` for sync + awareness). Custom minimal websocket provider is fine. Server holds the authoritative Y.Doc per open project and persists it. |
-| Presence | Yjs awareness: user id, display name, color, current view (function/module id), focused field (`itemId` + `columnId`), cursor in text. |
-| Field highlight | When a user focuses a field, every other client shows that field with the user's color outline + name tag. Text fields (text/Markdown) merge character-level via `Y.Text`. Scalar fields (number/date/boolean/dropdown/reference) are last-writer-wins; show a soft lock (highlight + name, warn before overwriting). |
+| Live sync | Server-ordered operations over WebSocket; each change commits to PostgreSQL before acknowledgement and broadcast. |
+| Presence | Per-connection view, focused field and new-item drafting state; ephemeral, throttled to 10 updates/second. |
+| Field highlight | Exclusive session lease locks, colored row/field outline and editor name. Edits use local drafts and debounced patches; conflicting edits are rejected. |
 | ID allocation | Server-authoritative. Clients create pending rows with temporary ids; server assigns real IDs atomically and broadcasts. Retired IDs stay retired. |
 | Discovery | UDP broadcast beacon on the LAN (no mDNS dependency needed): server announces `{name, version, host, port, tls, fingerprint}` every few seconds on a fixed port; client lists discovered servers. Manual `host:port` entry always available. |
 | Security on LAN | HTTPS/WSS with a self-signed certificate generated on first server start; client pins the fingerprint on first connect (trust-on-first-use) and warns if it changes. Plain HTTP allowed only with an explicit server flag for testing. |
 | Accounts | Per server. Passwords hashed with `node:crypto` scrypt. Session tokens (random, stored hashed, expiring). First account created through a one-time **setup token** printed to the server console becomes Server Owner. |
-| Storage on server | Server data dir: SQLite (`better-sqlite3`) for users, sessions, rooms, memberships, invites, join requests, audit log; project workspaces as JSON on disk in the existing format; Yjs update log for crash safety. |
+| Storage on server | PostgreSQL for accounts, rooms, operation log, snapshots, revisions and audit. Data directory stores TLS keys only. SQLite remains client-only. |
 | Save model | **Autosave**: every change is persisted on the server continuously (debounced, crash-safe) to the room's working copy. Nobody loses work. **Save** (admins only) creates a named, immutable **revision** (snapshot of the JSON workspace) with message, author, timestamp. Admins can view revision history, diff, and restore (restore is itself a new revision). Clients show "autosaved" / "last revision" status. |
 
 ## 3. Roles and permissions (refine into `docs/collab/PERMISSIONS.md`)
@@ -70,11 +69,10 @@ Room flows:
 - Invites: direct invite to a server user (they accept/decline), and invite codes with expiry and max uses.
 - Join requests: user requests, room admins get a live notification, approve with a chosen role or reject.
 - Kick, ban, leave, role change, ownership transfer. All of these go to an audit log.
-- Permission checks happen **on the server** for every REST call and every Yjs update (reject updates from
+- Permission checks happen **on the server** for every REST call and every operation (reject updates from
   viewers; reject settings changes from non-admins). The UI hides what the user cannot do, but the server enforces.
 
-One room holds one active project. A user can open or create the project when creating the room, import a local
-workspace into it, or export it back to a local workspace.
+One room holds one active project. A user can create a project with the room, import a local copy of that project, or export it back to a local workspace.
 
 ## 4. Client UX (fill the gaps sensibly)
 

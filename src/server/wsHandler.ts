@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import type { IncomingMessage } from 'node:http';
 import type { Duplex } from 'node:stream';
 import { WebSocket, WebSocketServer, type RawData } from 'ws';
@@ -54,7 +54,7 @@ export class CollabWsHandler {
   readonly wss: WebSocketServer;
 
   constructor(private readonly deps: CollabWsHandlerDeps) {
-    this.wss = new WebSocketServer({ noServer: true });
+    this.wss = new WebSocketServer({ noServer: true, maxPayload: 50 * 1024 * 1024 });
   }
 
   handleUpgrade(req: IncomingMessage, socket: Duplex, head: Buffer): void {
@@ -74,7 +74,12 @@ export class CollabWsHandler {
       return;
     }
 
-    const roomId = decodeURIComponent(match[1]);
+    let roomId: string;
+    try { roomId = decodeURIComponent(match[1]); } catch {
+      socket.write('HTTP/1.1 400 Bad Request\r\n\r\n');
+      socket.destroy();
+      return;
+    }
     const token = extractTokenFromUpgradeRequest(req, url);
 
     this.wss.handleUpgrade(req, socket, head, ws => {
@@ -151,6 +156,7 @@ export class CollabWsHandler {
 
     ws.on('message', (data: RawData) => {
       if (!isReady) {
+        if (bufferedMessages.length >= 100) { ws.close(1009, 'Too many pending messages'); return; }
         bufferedMessages.push(data);
         return;
       }
@@ -179,6 +185,7 @@ export class CollabWsHandler {
 
       runtime.addClient({
         connectionId,
+        sessionId: createHash('sha256').update(token!).digest('hex'),
         user,
         role,
         color: assignUserColor(user.id),
@@ -230,7 +237,7 @@ export class CollabWsHandler {
     }
 
     const msg = validated.data;
-    switch (msg.type) {
+    try { switch (msg.type) {
       case 'op':
         await runtime.handleOp(connectionId, msg.op);
         break;
@@ -269,7 +276,10 @@ export class CollabWsHandler {
           timestamp: msg.timestamp,
         });
         break;
+    }    } catch (error) {
+      sendServerMessage({ type: 'error', code: error instanceof CollabServiceError ? error.code : 'INTERNAL_ERROR', message: error instanceof Error ? error.message : 'Request failed', ...('key' in msg ? { requestId: `lock:${msg.key}` } : {}) });
     }
+
   }
 
   closeAll(): void {

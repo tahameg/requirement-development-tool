@@ -1029,6 +1029,8 @@ export const wsClientMessageSchema = z.discriminatedUnion('type', [
 ]);
 
 export const wsServerMessageSchema = z.discriminatedUnion('type', [
+  z.object({ type: z.literal('presence-left'), connectionId: z.string() }).strict(),
+  z.object({ type: z.literal('lock-revoked'), key: z.string(), reason: z.string() }).strict(),
   roomWelcomeSchema,
   opAckSchema,
   opRejectedSchema,

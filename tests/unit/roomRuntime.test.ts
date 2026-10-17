@@ -439,6 +439,7 @@ describe('T05 / R01 / R02: RoomRuntime, CollabServer, REST API, and WebSocket ha
       expect((await client.waitForMessage('op-ack')).seq).toBe(1);
       const itemId = runtime.getWorkspace().domains.REQUIREMENT.functions[0]!.items[0]!.id;
       const edit = { opId: randomUUID(), kind: 'item.edit' as const, payload: { objectType: 'REQUIREMENT' as const, functionId, itemId, values: { col_desc: 'Updated' } } };
+      client.send({ type: 'lock-release', key: `item:${itemId}` });
       client.send({ type: 'op', op: edit });
       expect((await client.waitForMessage('op-rejected')).code).toBe('LOCKED');
       client.send({ type: 'lock-acquire', key: `item:${itemId}` });

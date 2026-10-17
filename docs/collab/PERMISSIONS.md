@@ -3,7 +3,7 @@
 This document defines the role hierarchy, complete permission matrices (server-level and room-level), membership state transitions, and the exact enforcement points across the server and client.
 
 > [!IMPORTANT]
-> **Golden Rule**: Every permission check is enforced **authoritatively on the server** for both REST endpoints and WebSocket/Yjs binary updates. The client UI hides or disables disallowed controls for ergonomics, but the server never trusts the client.
+> **Golden Rule**: Every permission check is enforced **authoritatively on the server** for both REST endpoints and WebSocket operations. The client UI hides or disables disallowed controls for ergonomics, but the server never trusts the client.
 
 ---
 

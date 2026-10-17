@@ -1,3 +1,4 @@
+import { Collaboration } from './components/collab/Collaboration.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import type { AppState, Result } from '../shared/api.js';
 import type { AppSettings } from '../shared/appSettings.js';
@@ -11,6 +12,7 @@ import { SearchDialog } from './components/search/SearchDialog.js';
 import { HierarchyView } from './components/editor/HierarchyView.js';
 
 export function App() {
+  const [collaboration, setCollaboration] = useState(false);
   const [state, setState] = useState<AppState>();
   const [dirty, setDirty] = useState(false);
   const saveDraft = useRef<(() => Promise<void>) | null>(null);
@@ -93,8 +95,9 @@ export function App() {
       setState(result.value); select(next); setEditor(null);
     } finally { setBusy(false); }
   }
+  if (collaboration) return <Collaboration onOffline={() => setCollaboration(false)} />;
   return <div className="app">
-    <header><div className="brand"><span className="brand-mark">H</span><strong>HLR <span>Writing Tool</span></strong></div><span className="project-title">{current?.workspace.config.projectName ?? 'Workspace overview'}</span><button disabled={busy || !current} onClick={() => setSearchOpen(true)}>Search <kbd>Ctrl P</kbd></button><button disabled={busy} onClick={() => navigate('app')}>Application settings</button></header>
+    <header><div className="brand"><span className="brand-mark">H</span><strong>HLR <span>Writing Tool</span></strong></div><span className="project-title">{current?.workspace.config.projectName ?? 'Workspace overview'}</span><button disabled={busy || !current} onClick={() => setSearchOpen(true)}>Search <kbd>Ctrl P</kbd></button><button disabled={busy} onClick={() => { if (mayLeave()) setCollaboration(true); }}>Connect to server</button><button disabled={busy} onClick={() => navigate('app')}>Application settings</button></header>
     <div className="body"><aside><div className="eyebrow">WORKSPACE</div><button className={panel === 'home' ? 'nav selected' : 'nav'} onClick={() => navigate('home')}>▦ &nbsp; Overview</button><div className="rule" /><div className="eyebrow">OBJECT TYPES</div><WorkspaceTree key={current?.root ?? 'unopened'} workspace={current?.workspace} selected={panel === 'hierarchy' ? selected : null} busy={busy} onSelect={select} onAction={hierarchyAction} /><div className="sidebar-bottom"><span className="dot" /> Local workspace<br /><small>Your files stay on this computer.</small></div></aside>
     <main aria-busy={busy}>{notice && <p className="notice" role="status">{notice}</p>}{error && <div role="alert" className="error">{error}<button onClick={() => setError('')} aria-label="Dismiss error">×</button></div>}
     {panel === 'hierarchy' && selected ? <HierarchyView workspace={current?.workspace} selected={selected} busy={busy} onSelect={select} onAction={hierarchyAction} onCreate={() => { setName(''); setPanel('new'); }} onOpen={() => void run(() => window.hlr.openProject())} onSave={editItems} onDraft={onDraft} autosave={state?.settings.general.auto_save_interval_sec ?? 0} onExport={request => void exportFile(request)} focusedItem={focusedItem} />

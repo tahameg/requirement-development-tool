@@ -1,3 +1,5 @@
+import { z } from 'zod';
+import { revisionMetadata, diffWorkspaces } from './revisions.js';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
@@ -757,6 +759,37 @@ export class CollabServer {
         const member = await this.roomService.changeMemberRole(user, roomId, targetUserId, body);
         sendSuccess(res, { member }, 200);
         return;
+      }
+
+      const revisionsMatch = /^\/api\/rooms\/([^/]+)\/revisions(?:\/([^/]+)(?:\/(restore|diff))?)?$/.exec(pathname);
+      if (revisionsMatch) {
+        const user = await this.authenticate(req);
+        const roomId = decodeURIComponent(revisionsMatch[1]!);
+        await this.roomService.getRoomSummary(roomId, user.id);
+        if (!await this.roomService.getMemberRole(roomId, user.id)) throw new CollabServiceError('FORBIDDEN', 'Room membership required');
+        const runtime = await this.runtimeManager.getOrCreateRoomRuntime(roomId);
+        const id = revisionsMatch[2] ? decodeURIComponent(revisionsMatch[2]) : null;
+        if (!id && method === 'GET') { sendSuccess(res, { revisions: (await this.store.revisions.listByRoom(roomId)).map(revisionMetadata) }); return; }
+        if (!id && method === 'POST') { const body = z.object({ message: z.string().trim().min(1).max(1000) }).strict().parse(await readJsonBody(req)); sendSuccess(res, { revision: await runtime.saveRevision(user, body.message) }); return; }
+        if (id) {
+          const revision = await this.store.revisions.getById(id);
+          if (!revision || revision.room_id !== roomId) throw new CollabServiceError('NOT_FOUND', 'Revision not found');
+          if (method === 'POST' && revisionsMatch[3] === 'restore') { sendSuccess(res, await runtime.restoreRevision(user, id)); return; }
+          if (method === 'GET') {
+            const compareId = url.searchParams.get('to');
+            const compare = compareId ? await this.store.revisions.getById(compareId) : null;
+            if (compareId && (!compare || compare.room_id !== roomId)) throw new CollabServiceError('NOT_FOUND', 'Comparison revision not found');
+            sendSuccess(res, revisionsMatch[3] === 'diff' ? diffWorkspaces(revision.workspace, compare?.workspace ?? runtime.getWorkspace()) : { revision: revisionMetadata(revision), workspace: revision.workspace }); return;
+          }
+        }
+      }
+      const importMatch = /^\/api\/rooms\/([^/]+)\/import$/.exec(pathname);
+      if (importMatch && method === 'POST') {
+        const user = await this.authenticate(req);
+        const body = z.object({ workspace: z.unknown(), message: z.string().trim().min(1).max(1000) }).strict().parse(await readJsonBody(req));
+        const runtime = await this.runtimeManager.getOrCreateRoomRuntime(decodeURIComponent(importMatch[1]!));
+        const revision = await runtime.saveRevision(user, body.message, body.workspace as import('../shared/types/workspace.js').Workspace);
+        sendSuccess(res, await runtime.restoreRevision(user, revision.id)); return;
       }
 
       const roomAuditMatch = /^\/api\/rooms\/([^/]+)\/audit$/.exec(pathname);

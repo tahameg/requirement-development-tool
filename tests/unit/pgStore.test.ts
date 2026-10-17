@@ -64,7 +64,7 @@ describe('R02: PostgreSQL Server Store and Migrations', () => {
         ]);
 
         const totalApplied = [...res1.applied, ...res2.applied];
-        expect(totalApplied).toEqual(['0001_init.sql']);
+        expect(totalApplied).toEqual(['0001_init.sql', '0002_revision_sequences.sql']);
       } finally {
         await client1.query(`DROP SCHEMA IF EXISTS "${testSchema}" CASCADE`);
         await client1.end();

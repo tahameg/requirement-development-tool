@@ -1,6 +1,8 @@
 # Multi-User Collaboration Implementation Tasks
 
-Each implementer session must complete **only the first unchecked task** below, keep `npm run typecheck`, `npm test`, and `npm run build` green, mark the task `- [x]`, document changes in `docs/collab/PROGRESS.md`, and commit.
+The user authorized completing all remaining tasks in one session on 2026-10-17, superseding the original one-task-per-session limit. Keep typecheck, tests and build green, record verified results in `PROGRESS.md`, and commit.
+
+**Current stage:** R01–R04 and T07–T14 are implemented and verified on Linux with real PostgreSQL, HTTPS/WebSocket clients and Electron. Deployment assets are prepared; Docker image execution and Windows installation still require validation on those target environments. T01–T06 below retain historical descriptions; their Yjs/SQLite server architecture was replaced by plan v2.
 
 > [!IMPORTANT]
 > Do not modify `src/shared/utils/idUtils.ts`, `src/main/services/idGenerator.ts`, `src/shared/types/schema.ts`, or `src/main/services/validation.ts` unless preserving 100% statement, branch, function, and line coverage enforced by `vitest.config.ts`. Import and reuse them from the new collaboration modules.
@@ -53,47 +55,47 @@ Each implementer session must complete **only the first unchecked task** below, 
   - Files: `src/server/roomRuntime.ts`, `src/server/wsHandler.ts`, `src/server/store/**`, `tests/unit/roomRuntime.test.ts`, `tests/unit/opEngine.test.ts`
   - Acceptance: 50 concurrent `item.add` from 5 sockets produce 50 unique sequential IDs with seqs 1..N and every client ends with an identical workspace; duplicate `opId` returns original result without re-applying; kill/restart (new runtime on same data dir) after acked ops loses nothing; gap triggers correct `ops-since` reply; a 10,000-item workspace applies an `item.edit` in under 5 ms on the server (benchmark test).
 
-- [ ] R04: Lock manager and presence
+- [x] R04: Lock manager and presence
   - Goal: Implement ARCHITECTURE-v2 sections 4 and 5 on the server: lease locks with heartbeat, reaping, 30 s grace on socket close with reclaim on reconnect, force-release by admins (audited, holder notified), auto-grant `item:<id>` to the creator after `item.add`, release on delete, `locks-changed` broadcasts, presence throttling and broadcast. Enforce locks inside op authorization.
   - Files: `src/server/locks.ts`, `src/server/roomRuntime.ts`, `tests/unit/locks.test.ts`
   - Acceptance: tests with fake timers for acquire/deny/heartbeat/expiry/grace reclaim/force-release; second user's `item.edit` on a locked row is rejected `LOCKED`; module delete rejected while a lock is held inside it; viewer cannot acquire; presence throttled to 10/s.
 
-- [ ] T07: Client connection layer, TOFU pinning, room mirror, IPC
+- [x] T07: Client connection layer, TOFU pinning, room mirror, IPC
   - Goal: As v1 T07 (TOFU TLS pinning, remembered servers, CSP/origin policy, IPC wiring) but `CollabClient` keeps a plain `Workspace` mirror applied from `room-welcome` and `op-applied` in seq order with gap detection, exposes `sendOp`, `acquireLock`, `releaseLock`, heartbeats while a lock is held, presence updates, and emits state (workspace, locks, presence, connection state) to the renderer.
   - Files: `src/main/collab/tlsPinning.ts`, `src/main/collab/collabClient.ts`, `src/shared/appSettings.ts`, `src/shared/api.ts`, `src/main/services/desktopService.ts`, `src/main/ipc/registerHandlers.ts`, `src/main/window.ts`, `src/preload/index.ts`, `tests/unit/collabClient.test.ts`, `tests/unit/collabIpc.test.ts`
   - Acceptance: TOFU pin/mismatch/re-trust tests; client against a real in-process server mirrors ops in order, fills a gap via `ops-since`, heartbeats keep a lock alive; origin policy blocks everything except `file:`, `devtools:` and the active server.
 
-- [ ] T08: Server connection UI
+- [x] T08: Server connection UI
   - Goal: Unchanged from v1 T08 (work offline vs connect, discovered + remembered servers, manual address, TLS mismatch modal, setup token, login, register by mode).
   - Files: `src/renderer/components/collab/ServerConnectView.tsx`, `src/renderer/App.tsx`, `src/renderer/styles.css`, `tests/unit/serverConnectUi.test.ts`
   - Acceptance: as v1 T08.
 
-- [ ] T09: Room lobby and server administration UI
+- [x] T09: Room lobby and server administration UI
   - Goal: Unchanged from v1 T09.
   - Files: as v1 T09
   - Acceptance: as v1 T09.
 
-- [ ] T10: In-room live UI with locks and presence
+- [x] T10: In-room live UI with locks and presence
   - Goal: Header with members online, connection and autosave status. Tree and editor show presence avatars. Clicking a row/cell acquires `item:<id>`; if denied, the row is read-only with holder color outline and name tag. While holding, edits go to a local draft sent as debounced `item.edit` patches (300 ms, blur, Enter, Save); Esc reverts and releases; leaving the row releases. Locked rows of others show the holder's focused cell highlighted. "Add requirement" is a local draft committed with `item.add`; others see "<name> is adding a requirement". Same lock flow for function description, node properties and project settings (`config`). Role-gated actions. Admin force-release in the members modal. `RoomMembersModal` as in v1 T10.
   - Files: `src/renderer/components/collab/*`, `src/renderer/components/editor/*`, `src/renderer/components/tree/WorkspaceTree.tsx`, `src/renderer/App.tsx`, `src/renderer/styles.css`, `tests/unit/inRoomCollabUi.test.ts`
   - Acceptance: tests for role capability helpers, lock-state to UI-state mapping (free / mine / others), draft debounce and patch building (only changed columns), presence grouping by node; `npm run build` passes.
 
-- [ ] T11: Revisions
+- [x] T11: Revisions
   - Goal: As v1 T11, but restore runs as a `room.restore` op through the queue, force-releases all locks with a notice, and keeps the ID-safety rule. Admins can also import a local workspace as a new revision.
   - Files: `src/server/revisions.ts`, `src/server/httpServer.ts`, client and renderer files as v1 T11, `tests/unit/serverRevisions.test.ts`
   - Acceptance: as v1 T11, plus restore through the queue is ordered relative to concurrent ops and releases locks.
 
-- [ ] T12: Disconnect handling, lock reclaim, draft preservation
+- [x] T12: Disconnect handling, lock reclaim, draft preservation
   - Goal: ARCHITECTURE-v2 section 8: read-only room on disconnect with banner, draft persisted to disk, reconnect with snapshot, lock reclaim within grace, draft resend, and a side-by-side "your draft vs current" dialog when the lock was lost or the row changed/deleted. Export room to local workspace.
   - Files: `src/main/collab/collabClient.ts`, `src/main/collab/draftStore.ts`, renderer dialog, `tests/unit/collabReconnect.test.ts`
   - Acceptance: tests: blip under 30 s keeps lock and resends draft; blip over 30 s with another user taking the lock surfaces the draft dialog; deleted row surfaces the dialog; nothing applied silently.
 
-- [ ] T13: Offline bundle, Dockerfile, README, Agents.md
+- [x] T13: Offline bundle, Dockerfile, README, Agents.md
   - Goal: As v1 T13, documenting the v2 model (ordered ops, locks, autosave vs revisions). Yjs must not appear in docs except as "replaced".
   - Files: as v1 T13
   - Acceptance: as v1 T13.
 
-- [ ] T14: End-to-end multi-user test
+- [x] T14: End-to-end multi-user test
   - Goal: Real server over HTTPS/WSS on localhost with discovery and 3 clients: setup token, register, room create, join request + approval, invite code; two editors add requirements concurrently (unique IDs, identical final state); editor A locks a row, editor B is denied and sees holder; A's debounced patches reach B; viewer writes rejected; admin force-release; admin saves revision and restores it; disconnect/reconnect within grace keeps lock and draft; server restart loses no acked op.
   - Files: `tests/unit/collabE2E.test.ts`
   - Acceptance: passes in `npm test`; typecheck and build green.

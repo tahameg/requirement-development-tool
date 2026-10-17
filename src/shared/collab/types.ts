@@ -487,6 +487,8 @@ export type WsClientMessage =
     };
 
 export type WsServerMessage =
+  | { type: 'presence-left'; connectionId: string }
+  | { type: 'lock-revoked'; key: string; reason: string }
   | {
       type: 'room-welcome';
       roomId: string;
