@@ -6,7 +6,9 @@ export function ServerConnectView({ state, run }: { state: CollabState; run: (fn
   const [probe, setProbe] = useState<{ address: string; fingerprint: string | null; previous: string | null } | null>(null);
   const [method, setMethod] = useState<'login'|'register'|'setup'>('login');
   useEffect(() => { void collab({ action: 'discover' }).catch(() => {}); }, []);
-  useEffect(() => { if (state.server?.setupRequired) setMethod('setup'); else setMethod('login'); }, [state.server]);
+  // Depend on primitives: state is re-published (new object identity) on every discovery broadcast.
+  const setupRequired = !!state.server?.setupRequired;
+  useEffect(() => { setMethod(setupRequired ? 'setup' : 'login'); }, [state.address, setupRequired]);
   return <section className="form-card"><div className="eyebrow">COLLABORATION</div><h1>Connect to your team</h1><p>Choose a local server or enter its address. Your account belongs to that server.</p>
     {!state.server ? <><div className="server-list">{state.discovered.map(s => <button key={s.serverId} onClick={() => setAddress(`${s.tls ? 'https' : 'http'}://${s.host}:${s.port}`)}>{s.name} · {s.host}:{s.port}</button>)}{state.remembered.map(s => <button key={s} onClick={() => setAddress(s)}>{s}</button>)}</div>
     <form onSubmit={e => { e.preventDefault(); run(async () => setProbe(await collab({ action: 'probe', address }))); }}><label>Server address<input required value={address} placeholder="https://192.168.1.20:8443" onChange={e => setAddress(e.target.value)} /></label><button className="primary">Connect</button></form>
