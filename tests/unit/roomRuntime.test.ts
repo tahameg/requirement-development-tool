@@ -1,3 +1,6 @@
+import { randomUUID } from 'node:crypto';
+import { applyWorkspaceOp, type OpResult } from '../../src/server/opEngine.js';
+import { RoomRuntime } from '../../src/server/roomRuntime.js';
 import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -342,6 +345,110 @@ describe('T05 / R01 / R02: RoomRuntime, CollabServer, REST API, and WebSocket ha
     await client.close();
   });
 
+  it('orders 50 concurrent socket adds, retries idempotently, recovers acknowledged ops and supplies catch-up', async () => {
+    const fixture = await createTestStore({ schemaPrefix: 'op_runtime' });
+    fixtures.push(fixture);
+    const server = new CollabServer({ store: fixture.store, dataDir: createTempDir(), host: '127.0.0.1', port: 0,
+      insecureHttp: true, discovery: false, autosaveDebounceMs: 60000, autosaveMaxWaitMs: 60000 });
+    activeServers.push(server);
+    const info = await server.start();
+    const owner = await server.authService.claimSetupToken({ setupToken: info.setupToken!, username: 'owner', displayName: 'Owner', password: 'password123' });
+    const workspace = createSeededTestWorkspace();
+    const functionId = workspace.domains.REQUIREMENT.functions[0]!.functionId;
+    const room = await server.roomService.createRoom(owner.user, { name: 'Concurrent', visibility: 'listed', workspace });
+    const clients = await Promise.all(Array.from({ length: 5 }, () => connectTestWsClient(server.getWsBaseUrl(), room.id, owner.token)));
+    try {
+      await Promise.all(clients.map(c => c.waitForMessage('room-welcome')));
+      const ops = Array.from({ length: 50 }, (_, i) => ({ opId: randomUUID(), kind: 'item.add' as const,
+        payload: { objectType: 'REQUIREMENT' as const, functionId, values: { col_desc: `Requirement ${i}` } } }));
+      const acknowledgments = ops.map((op, i) => {
+        const client = clients[i % clients.length]!;
+        client.send({ type: 'op', op });
+        return client.waitForMessage('op-ack', msg => msg.opId === op.opId);
+      });
+      const acks = await Promise.all(acknowledgments);
+      expect(acks.map(a => a.seq).sort((a, b) => a - b)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
+      const runtime = server.runtimeManager.getLoadedRuntime(room.id)!;
+      const live = runtime.getWorkspace();
+      expect(new Set(live.domains.REQUIREMENT.functions[0]!.items.map(i => i.id)).size).toBe(50);
+      for (const client of clients) {
+        let mirror = workspace;
+        for (let seq = 1; seq <= 50; seq++) {
+          const applied = await client.waitForMessage('op-applied', m => m.seq === seq);
+          mirror = applyWorkspaceOp(mirror, applied.op, applied.result as OpResult).workspace;
+        }
+        expect(mirror).toEqual(live);
+      }
+      clients[0]!.send({ type: 'op', op: ops[0]! });
+      expect(await clients[0]!.waitForMessage('op-ack', m => m.opId === ops[0]!.opId)).toEqual(acks[0]);
+      expect(runtime.getHeadSeq()).toBe(50);
+      clients[0]!.send({ type: 'op', op: { ...ops[0]!, payload: { ...ops[0]!.payload, values: { col_desc: 'Different request' } } } });
+      expect((await clients[0]!.waitForMessage('op-rejected')).code).toBe('CONFLICT');
+      // Create a fresh runtime without flushing the original: only the initial snapshot exists.
+      expect((await fixture.store.snapshots.getLatest(room.id))!.seq).toBe(0);
+      const restarted = await RoomRuntime.create(room.id, fixture.store, server.roomService);
+      expect(restarted.getWorkspace()).toEqual(live);
+      expect(restarted.getHeadSeq()).toBe(50);
+      // REST/export paths also recover committed operations before a room has been loaded.
+      server.roomService.setRuntimeHooks({ getWorkspaceProvider: () => null });
+      expect(await server.roomService.loadRoomWorkspace(room.id)).toEqual(live);
+      clients[0]!.send({ type: 'ops-since', seq: 45 });
+      const catchup = await clients[0]!.waitForMessage('ops-since-reply');
+      expect(catchup.ops.map(o => o.seq)).toEqual([46, 47, 48, 49, 50]);
+      await restarted.close();
+      expect((await fixture.store.rooms.getById(room.id))!.snapshot_seq).toBe(50);
+      // Catch-up must also fall back when the stored log has a hole.
+      await fixture.pool.query('DELETE FROM room_ops WHERE room_id = $1 AND seq = 47', [room.id]);
+      clients[0]!.send({ type: 'ops-since', seq: 45 });
+      expect((await clients[0]!.waitForMessage('snapshot')).seq).toBe(50);
+      await fixture.store.ops.prune(room.id, 50, '2100-01-01T00:00:00.000Z');
+      clients[0]!.send({ type: 'ops-since', seq: 0 });
+      expect((await clients[0]!.waitForMessage('snapshot')).workspace).toEqual(live);
+    } finally { await Promise.all(clients.map(c => c.close())); }
+  });
+
+  it('rejects unauthorized edits and failed commits without advancing or poisoning the queue', async () => {
+    const fixture = await createTestStore({ schemaPrefix: 'op_failure' });
+    fixtures.push(fixture);
+    const server = new CollabServer({ store: fixture.store, dataDir: createTempDir(), host: '127.0.0.1', port: 0, insecureHttp: true, discovery: false });
+    activeServers.push(server);
+    const info = await server.start();
+    const owner = await server.authService.claimSetupToken({ setupToken: info.setupToken!, username: 'owner', displayName: 'Owner', password: 'password123' });
+    const workspace = createSeededTestWorkspace();
+    const functionId = workspace.domains.REQUIREMENT.functions[0]!.functionId;
+    const room = await server.roomService.createRoom(owner.user, { name: 'Rejects', visibility: 'listed', workspace });
+    const client = await connectTestWsClient(server.getWsBaseUrl(), room.id, owner.token);
+    try {
+      await client.waitForMessage('room-welcome');
+      const runtime = server.runtimeManager.getLoadedRuntime(room.id)!;
+      const op = { opId: randomUUID(), kind: 'item.add' as const, payload: { objectType: 'REQUIREMENT' as const, functionId, values: { col_desc: 'Valid' } } };
+      await fixture.store.memberships.updateRole(room.id, owner.user.id, 'VIEWER');
+      client.send({ type: 'op', op });
+      expect((await client.waitForMessage('op-rejected')).code).toBe('READ_ONLY');
+      expect(runtime.getHeadSeq()).toBe(0);
+      await fixture.store.memberships.updateRole(room.id, owner.user.id, 'ROOM_OWNER');
+      // A database constraint failure must roll back both the log and head update.
+      await fixture.pool.query(`ALTER TABLE room_ops ADD CONSTRAINT test_reject_ops CHECK (kind <> 'item.add')`);
+      client.send({ type: 'op', op });
+      await client.waitForMessage('op-rejected');
+      expect(runtime.getWorkspace()).toEqual(workspace);
+      expect(runtime.getHeadSeq()).toBe(0);
+      expect(await fixture.store.ops.getByOpId(room.id, op.opId)).toBeNull();
+      await fixture.pool.query('ALTER TABLE room_ops DROP CONSTRAINT test_reject_ops');
+      client.send({ type: 'op', op });
+      expect((await client.waitForMessage('op-ack')).seq).toBe(1);
+      const itemId = runtime.getWorkspace().domains.REQUIREMENT.functions[0]!.items[0]!.id;
+      const edit = { opId: randomUUID(), kind: 'item.edit' as const, payload: { objectType: 'REQUIREMENT' as const, functionId, itemId, values: { col_desc: 'Updated' } } };
+      client.send({ type: 'op', op: edit });
+      expect((await client.waitForMessage('op-rejected')).code).toBe('LOCKED');
+      client.send({ type: 'lock-acquire', key: `item:${itemId}` });
+      await client.waitForMessage('lock-granted');
+      client.send({ type: 'op', op: edit });
+      expect((await client.waitForMessage('op-ack', m => m.opId === edit.opId)).seq).toBe(2);
+      expect(runtime.getWorkspace().domains.REQUIREMENT.functions[0]!.items[0]!.values.col_desc).toBe('Updated');
+    } finally { await client.close(); }
+  });
+
   it('parses CLI flags and starts/stops via startServerFromCli', async () => {
     const dataDir = createTempDir();
     const parsed = parseServerCliArgs(
@@ -377,10 +484,13 @@ describe('T05 / R01 / R02: RoomRuntime, CollabServer, REST API, and WebSocket ha
     expect(helpResult).toBeNull();
     expect(logs.join('\n')).toContain('HLR Collaboration Server');
 
+    const cliFixture = await createTestStore({ schemaPrefix: 'cli' });
+    fixtures.push(cliFixture);
     const serverLogs: string[] = [];
     const cliServer = await startServerFromCli(
       [
         `--data-dir=${dataDir}`,
+        `--database-url=${cliFixture.databaseUrl}${cliFixture.databaseUrl.includes('?') ? '&' : '?'}options=${encodeURIComponent('-c search_path=' + cliFixture.schema)}`,
         '--host=127.0.0.1',
         '--port=0',
         '--setup-token=cli_setup_tok_123',

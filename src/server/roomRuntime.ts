@@ -1,13 +1,13 @@
-import { validateWorkspace } from '../main/services/validation.js';
+import { recoverRoom } from './recoverRoom.js';
+import { applyWorkspaceOp, OpError } from './opEngine.js';
+import { authorizeOp } from '../shared/collab/permissions.js';
+import { collabOpSchema } from '../shared/collab/protocol.js';
 import {
-  assignUserColor,
   type CollabOp,
   type LockHolder,
   type LockInfo,
-  type OnlineMemberInfo,
   type PresenceBroadcastEntry,
   type PresenceState,
-  type RevisionMetadata,
   type RoomMemberInfo,
   type RoomRole,
   type UserProfile,
@@ -15,11 +15,11 @@ import {
 } from '../shared/collab/types.js';
 import type { Workspace } from '../shared/types/workspace.js';
 import { CollabServiceError } from './errors.js';
-import type { RevisionRow, ServerStore } from './store/index.js';
+import type { ServerStore } from './store/index.js';
 import type { RoomLifecycleEvent, RoomService } from './rooms.js';
 
-export const DEFAULT_AUTOSAVE_DEBOUNCE_MS = 500;
-export const DEFAULT_AUTOSAVE_MAX_WAIT_MS = 2000;
+export const DEFAULT_AUTOSAVE_DEBOUNCE_MS = 2000;
+export const DEFAULT_AUTOSAVE_MAX_WAIT_MS = 10000;
 
 export interface RoomClientConnection {
   connectionId: string;
@@ -52,6 +52,7 @@ export class RoomRuntime {
   private mutationQueue: Promise<void> = Promise.resolve();
   private initialized = false;
   private disposed = false;
+  private closing = false;
   private seq = 0;
 
   constructor(
@@ -82,12 +83,10 @@ export class RoomRuntime {
       return;
     }
 
-    const roomRow = await this.store.rooms.getById(this.roomId);
-    this.lastAutosavedAt = roomRow?.last_autosaved_at ?? null;
-    this.workspace = validateWorkspace(await this.roomService.loadRoomWorkspace(this.roomId));
-
-    const latestSnapshot = await this.store.snapshots.getLatest(this.roomId);
-    this.seq = Math.max(roomRow?.head_seq ?? 0, latestSnapshot?.seq ?? 0);
+    const recovered = await recoverRoom(this.store, this.roomId);
+    this.workspace = recovered.workspace;
+    this.seq = recovered.seq;
+    this.lastAutosavedAt = recovered.lastAutosavedAt;
 
     this.initialized = true;
   }
@@ -145,13 +144,13 @@ export class RoomRuntime {
   getLockState(): Record<string, LockHolder> {
     const obj: Record<string, LockHolder> = {};
     for (const [key, info] of this.locks.entries()) {
-      obj[key] = { ...info.holder };
+      if (info.expiresAt > this.now().getTime()) obj[key] = { ...info.holder };
     }
     return obj;
   }
 
   addClient(connection: RoomClientConnection): void {
-    if (this.disposed) {
+    if (this.disposed || this.closing) {
       connection.close(1001, 'Room runtime disposed');
       return;
     }
@@ -260,6 +259,7 @@ export class RoomRuntime {
     const conn = this.connections.get(connectionId);
     if (!conn) throw new CollabServiceError('UNAUTHORIZED', 'Not connected to room');
 
+    if (conn.role === 'VIEWER' || key === 'config' && conn.role === 'EDITOR') throw new CollabServiceError('FORBIDDEN', 'You cannot acquire this lock');
     const existing = this.locks.get(key);
     const nowMs = this.now().getTime();
 
@@ -326,30 +326,36 @@ export class RoomRuntime {
   }
 
   async handleOp(connectionId: string, op: CollabOp): Promise<void> {
-    await this.applyOp(connectionId, op);
+    try {
+      const applied = await this.applyOp(connectionId, op);
+      this.connections.get(connectionId)?.send({ type: 'op-ack', opId: op.opId, ...applied });
+    } catch (error) {
+      this.connections.get(connectionId)?.send({ type: 'op-rejected', opId: op.opId,
+        code: error instanceof OpError ? error.code : error instanceof CollabServiceError && error.code === 'NOT_FOUND' ? 'NOT_FOUND' : 'VALIDATION',
+        message: error instanceof Error ? error.message : 'Operation failed.' });
+    }
   }
 
   async handleOpsSince(connectionId: string, seq: number): Promise<void> {
     const conn = this.connections.get(connectionId);
     if (!conn) return;
-    const rows = await this.store.ops.listSince(this.roomId, seq);
-    conn.send({
-      type: 'ops-since-reply',
-      sinceSeq: seq,
-      ops: rows.map(r => ({
-        seq: r.seq,
-        op: {
-          opId: r.op_id,
-          kind: r.kind as any,
-          payload: r.payload as any,
-        },
-        result: r.result,
-      })),
+    await this.enqueueMutation(async () => {
+      const rows = await this.store.ops.listSince(this.roomId, seq, 2000);
+      const contiguous = seq <= this.seq && rows.length === this.seq - seq && rows.every((r, i) => r.seq === seq + i + 1);
+      if (!contiguous) {
+        conn.send({ type: 'snapshot', seq: this.seq, workspace: this.getWorkspace() });
+        return;
+      }
+      conn.send({ type: 'ops-since-reply', sinceSeq: seq, ops: rows.map(r => ({ seq: r.seq,
+        op: collabOpSchema.parse({ opId: r.op_id, kind: r.kind, payload: r.payload }), result: r.result })) });
     });
   }
 
   async handleLockAcquire(connectionId: string, key: string): Promise<void> {
-    await this.acquireLock(connectionId, key);
+    const acquired = await this.acquireLock(connectionId, key);
+    this.connections.get(connectionId)?.send(acquired.ok
+      ? { type: 'lock-granted', key, expiresAt: this.locks.get(key)!.expiresAt }
+      : { type: 'lock-denied', key, holder: acquired.holder });
   }
 
   async handleLockRelease(connectionId: string, key: string): Promise<void> {
@@ -361,6 +367,8 @@ export class RoomRuntime {
   }
 
   async handleLockForceRelease(connectionId: string, key: string): Promise<void> {
+    const conn = this.connections.get(connectionId);
+    if (!conn || !['ROOM_OWNER', 'ROOM_ADMIN'].includes(conn.role)) throw new CollabServiceError('FORBIDDEN', 'Only room admins may release another user’s lock');
     await this.forceReleaseLock(key);
   }
 
@@ -372,35 +380,43 @@ export class RoomRuntime {
     connectionId: string,
     op: CollabOp,
   ): Promise<{ seq: number; result?: unknown }> {
-    const conn = this.connections.get(connectionId);
-    if (!conn) throw new CollabServiceError('UNAUTHORIZED', 'Not connected');
-
     return this.enqueueMutation(async () => {
-      this.seq += 1;
-      const currentSeq = this.seq;
-
-      // Persistence in store
-      await this.store.ops.append({
-        roomId: this.roomId,
-        seq: currentSeq,
-        opId: op.opId,
-        userId: conn.user.id,
-        kind: op.kind,
-        payload: op.payload,
-        result: {},
-        createdAt: this.now().toISOString(),
+      if (this.disposed || this.closing) throw new OpError('READ_ONLY', 'Room is closing');
+      const conn = this.connections.get(connectionId);
+      if (!conn) throw new OpError('FORBIDDEN', 'Not connected');
+      const parsed = collabOpSchema.parse(op);
+      let nextWorkspace = this.workspace;
+      let duplicate = false;
+      const applied = await this.store.transaction(async tx => {
+        const room = await tx.rooms.lockForUpdate(this.roomId);
+        if (!room) throw new OpError('NOT_FOUND', 'Room no longer exists');
+        const member = await tx.memberships.get(this.roomId, conn.user.id);
+        if (!member || await tx.bans.get(this.roomId, conn.user.id)) throw new OpError('FORBIDDEN', 'Room access was removed');
+        const previous = await tx.ops.getByOpId(this.roomId, parsed.opId);
+        if (previous) {
+          if (previous.user_id !== conn.user.id || canonical(previous.payload) !== canonical(parsed.payload) || previous.kind !== parsed.kind)
+            throw new OpError('CONFLICT', 'Operation ID was already used for a different request');
+          duplicate = true;
+          return { seq: previous.seq, result: previous.result };
+        }
+        if (room.head_seq !== this.seq) throw new OpError('CONFLICT', 'Room changed in another server process; reconnect after restarting this server');
+        const permission = authorizeOp(member.role, parsed, this.getLockState(), this.workspace, conn.user.id);
+        if (!permission.ok) throw new OpError(permission.code, permission.message);
+        const next = applyWorkspaceOp(this.workspace, parsed, { timestamp: this.now().toISOString() });
+        nextWorkspace = next.workspace;
+        const seq = this.seq + 1;
+        await tx.ops.append({ roomId: this.roomId, seq, opId: parsed.opId, userId: conn.user.id,
+          kind: parsed.kind, payload: parsed.payload, result: next.result, createdAt: next.result.timestamp });
+        await tx.rooms.update(this.roomId, { headSeq: seq, projectName: next.workspace.config.projectName });
+        return { seq, result: next.result };
       });
-
-      this.scheduleAutosave();
-
-      this.broadcast({
-        type: 'op-applied',
-        seq: currentSeq,
-        op,
-        result: {},
-      });
-
-      return { seq: currentSeq, result: {} };
+      if (!duplicate) {
+        this.workspace = nextWorkspace;
+        this.seq = applied.seq;
+        this.broadcast({ type: 'op-applied', seq: applied.seq, op: parsed, result: applied.result });
+        this.scheduleAutosave();
+      }
+      return applied;
     });
   }
 
@@ -519,12 +535,16 @@ export class RoomRuntime {
 
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
     this.debounceTimer = setTimeout(() => {
-      void this.flushAutosave();
+      void this.flushAutosave().catch(() => {
+        this.broadcast({ type: 'error', code: 'INTERNAL_ERROR', message: 'Snapshot save failed; committed edits remain in the operation log.' });
+      });
     }, this.autosaveDebounceMs);
 
     if (!this.maxWaitTimer) {
       this.maxWaitTimer = setTimeout(() => {
-        void this.flushAutosave();
+        void this.flushAutosave().catch(() => {
+          this.broadcast({ type: 'error', code: 'INTERNAL_ERROR', message: 'Snapshot save failed; committed edits remain in the operation log.' });
+        });
       }, this.autosaveMaxWaitMs);
     }
   }
@@ -543,17 +563,16 @@ export class RoomRuntime {
       if (this.disposed || !this.initialized) return;
       const autosavedAt = this.now().toISOString();
 
-      await this.store.snapshots.create({
-        roomId: this.roomId,
-        seq: this.seq,
-        workspace: this.workspace,
-        createdAt: autosavedAt,
+      await this.store.transaction(async tx => {
+        const room = await tx.rooms.lockForUpdate(this.roomId);
+        if (!room) return;
+        if (room.head_seq !== this.seq) throw new OpError('CONFLICT', 'Cannot snapshot a stale room');
+        await tx.snapshots.create({ roomId: this.roomId, seq: this.seq, workspace: this.workspace, createdAt: autosavedAt });
+        await tx.rooms.update(this.roomId, { snapshotSeq: this.seq, lastAutosavedAt: autosavedAt });
+        await tx.snapshots.prune(this.roomId, 3);
       });
-
       this.lastAutosavedAt = autosavedAt;
       this.autosaveStatus = 'autosaved';
-
-      await this.roomService.recordAutosave(this.roomId, autosavedAt);
 
       this.broadcast({
         type: 'autosave-status',
@@ -565,6 +584,12 @@ export class RoomRuntime {
 
   async close(): Promise<void> {
     if (this.disposed) return;
+    this.closing = true;
+    // The op log is already durable even if the optional shutdown snapshot fails.
+    try { await this.flushAutosave(); } catch {
+      this.broadcast({ type: 'error', code: 'INTERNAL_ERROR', message: 'Shutdown snapshot failed; edits will be recovered from the operation log.' });
+    }
+    await this.mutationQueue;
     this.disposed = true;
 
     if (this.debounceTimer) clearTimeout(this.debounceTimer);
@@ -654,6 +679,7 @@ export class RoomRuntimeManager {
     runtime.handleRoomLifecycleEvent(event);
     if (event.type === 'room-deleted') {
       this.runtimes.delete(event.roomId);
+      void runtime.close();
     }
   }
 
@@ -672,4 +698,10 @@ export class RoomRuntimeManager {
     this.runtimes.clear();
     this.loadingPromises.clear();
   }
+}
+
+function canonical(value: unknown): string {
+  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
+  if (value && typeof value === 'object') return '{' + Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => JSON.stringify(k) + ':' + canonical(v)).join(',') + '}';
+  return JSON.stringify(value);
 }

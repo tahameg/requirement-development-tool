@@ -238,6 +238,7 @@ export interface ServerSettingsRepository {
 }
 
 export interface RoomRepository {
+  lockForUpdate(id: string): Promise<RoomRow | null>;
   getById(id: string): Promise<RoomRow | null>;
   create(data: {
     id: string;

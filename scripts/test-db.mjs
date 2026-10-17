@@ -2,16 +2,14 @@ import { spawn, spawnSync } from 'node:child_process';
 import net from 'node:net';
 import pg from 'pg';
 
-async function findFreePort(startPort = 54330) {
+async function findFreePort() {
   return new Promise((resolve, reject) => {
     const server = net.createServer();
     server.unref();
-    server.on('error', () => {
-      findFreePort(startPort + 1).then(resolve, reject);
-    });
-    server.listen(startPort, '127.0.0.1', () => {
+    server.once('error', reject);
+    server.listen(0, '127.0.0.1', () => {
       const port = server.address().port;
-      server.close(() => resolve(port));
+      server.close(error => error ? reject(error) : resolve(port));
     });
   });
 }

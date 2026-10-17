@@ -146,7 +146,7 @@ export class CollabWsHandler {
           }
           await this.processClientMessage(runtime, connectionId, rawData, sendServerMessage);
         })
-        .catch(() => undefined);
+        .catch(error => sendServerMessage({ type: 'error', code: error instanceof CollabServiceError ? error.code : 'INTERNAL_ERROR', message: error instanceof Error ? error.message : 'Request failed' }));
     };
 
     ws.on('message', (data: RawData) => {
@@ -240,19 +240,19 @@ export class CollabWsHandler {
         break;
 
       case 'lock-acquire':
-        runtime.handleLockAcquire(connectionId, msg.key);
+        await runtime.handleLockAcquire(connectionId, msg.key);
         break;
 
       case 'lock-release':
-        runtime.handleLockRelease(connectionId, msg.key);
+        await runtime.handleLockRelease(connectionId, msg.key);
         break;
 
       case 'lock-heartbeat':
-        runtime.handleLockHeartbeat(connectionId, msg.key);
+        await runtime.handleLockHeartbeat(connectionId, msg.key);
         break;
 
       case 'lock-force-release':
-        runtime.handleLockForceRelease(connectionId, msg.key);
+        await runtime.handleLockForceRelease(connectionId, msg.key);
         break;
 
       case 'presence-update':

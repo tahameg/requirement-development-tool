@@ -1,3 +1,4 @@
+import { recoverRoom } from './recoverRoom.js';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { exportWorkspace } from '../main/services/exportService.js';
 import { validateWorkspace } from '../main/services/validation.js';
@@ -134,11 +135,7 @@ export class RoomService {
     if (live) {
       return structuredClone(live);
     }
-    const snapshot = await this.store.snapshots.getLatest(roomId);
-    if (!snapshot) {
-      throw new CollabServiceError('NOT_FOUND', `No workspace snapshot found for room '${roomId}'.`);
-    }
-    return structuredClone(snapshot.workspace);
+    return (await recoverRoom(this.store, roomId)).workspace;
   }
 
   async saveRoomWorkspace(roomId: string, workspace: Workspace, seq = 0): Promise<void> {

@@ -413,6 +413,11 @@ class PgRoomRepository implements RoomRepository {
     return res.rows[0] ? this.map(res.rows[0]) : null;
   }
 
+  async lockForUpdate(id: string): Promise<RoomRow | null> {
+    const res = await this.q.query('SELECT * FROM rooms WHERE id = $1 FOR UPDATE', [id]);
+    return res.rows[0] ? this.map(res.rows[0]) : null;
+  }
+
   async create(data: {
     id: string;
     name: string;

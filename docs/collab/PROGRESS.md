@@ -160,3 +160,28 @@
 - `RoomService` now persists workspace snapshots in PostgreSQL (`room_snapshots`) and tracks sequence numbers in `rooms.head_seq` and `rooms.snapshot_seq`. Disk-based workspace JSON is no longer created on the server.
 - The server op engine in R03 will implement per-room serial queue ordering, append to `room_ops` before broadcasting `op-applied` and acknowledging with `op-ack`, handle idempotent re-submission via `opId`, and implement catch-up via `ops-since` / `snapshot`.
 
+
+
+## R03 Server operation engine (2026-10-17)
+
+### What changed
+- Replaced the placeholder runtime that logged operations without applying them. A room now authorizes operations against current membership and active locks, applies domain changes, and commits the operation log and head sequence in one PostgreSQL transaction under a room row lock. Only committed changes update memory, broadcast, or receive an acknowledgement.
+- Added deterministic operation results (server-generated node/item identity and timestamps), duplicate retry handling, rejection messages, and recovery from the latest snapshot plus all later operations. Reusing an operation ID for different content is rejected. A second stale server runtime cannot overwrite the persisted head.
+- Added fast immutable item patches and description updates. Patches preserve unmodified columns and validate changed values/references. Existing hierarchy, ID allocation, settings and deletion services remain reused; structural operations still inherit their existing whole-workspace validation, while the frequent typing path avoids it.
+- Catch-up returns ordered log entries or a full snapshot when entries are missing, pruned, or exceed the response limit. REST room loading/export uses the same recovery path, including before the first WebSocket joins after restart.
+- Snapshots update snapshot_seq atomically, retain the latest three versions, run after 2 seconds idle / 10 seconds maximum, and flush on close. Snapshot failures are reported without losing committed operations.
+- Wired lock-granted/denied responses and awaited WebSocket lock handlers; disallowed viewer lock acquisition and non-admin forced release. Full lease lifecycle, reconnect grace, auditing and presence remain R04.
+- Fixed the test database port allocator's unbounded retry on permission errors. Fixed the CLI integration test to supply an isolated PostgreSQL schema.
+
+### Validation
+- `npm run typecheck` and `npm run build` pass.
+- Full `npm test` passes against real PostgreSQL 16.15: 108 tests, 16 files. All four protected core modules retain 100% statement/branch/function/line coverage.
+- Five real WebSocket connections submit 50 concurrent adds: unique IDs and ordered sequences, identical reconstructed client workspaces, idempotent retries, rejection of changed retry payloads, restart recovery before snapshotting, REST recovery, catch-up and missing/pruned-log snapshot fallback.
+- Database constraint failure proves transaction rollback preserves memory, sequence and log and does not poison the queue. Viewer and lockless edits are rejected.
+- The 10,000-item patch benchmark passes the 5 ms limit for domain application (excluding database/network latency).
+- Docker access was unavailable. Tests used an official PostgreSQL package extracted into `/tmp`, with an isolated localhost database; no system installation or production database changes.
+
+### Remaining plan
+- R04 is next: full lease lock manager and presence. T07–T10 connect the desktop client and collaboration UI. T11–T14 cover revisions, reconnect/drafts, offline deployment and full product end-to-end testing.
+- `room.restore` currently rejects explicitly rather than logging an unimplemented change; implementation belongs to T11.
+- Existing unrelated edits in package.json, build-preload.mjs, run-server.mjs and migrator.ts were preserved.

@@ -86,6 +86,8 @@ Application settings are written to `$XDG_CONFIG_HOME/hlr-writing-tool/config.in
 
 The server component (`npm run server`) provides multi-user real-time room collaboration. Server storage is backed by PostgreSQL using pure-JavaScript `pg` (no native C++ build steps required). Client-side desktop storage remains local SQLite via `better-sqlite3`.
 
+The v2 server operation engine is implemented: ordered edits, permission checks, transactional acknowledgements, idempotent retries, snapshot/log recovery, and catch-up are tested with real WebSocket clients. **The desktop collaboration connection and room UI are not implemented yet.** Follow [the collaboration task plan](docs/collab/TASKS.md); R04 (full lock/presence lifecycle) is next, followed by the client connection and UI tasks. The existing desktop continues to work offline.
+
 ### Server Configuration Flags & Environment Variables
 
 | CLI Flag | Environment Variable | Default | Description |
