@@ -1,5 +1,8 @@
 # Agents.md: High-Level Requirement (HLR) Writing Tool
 
+> **Multiuser update (2026-10-17):** This document defines the offline authoring domain. Collaboration follows `docs/collab/BRIEF.md`, `ARCHITECTURE-v2.md`, `PERMISSIONS.md` and `PROTOCOL.md`. The optional headless server uses PostgreSQL, ordered operations and session edit locks; the desktop preserves local JSON/SQLite offline mode. See `docs/collab/DEPLOYMENT.md` for offline server installation, TLS trust, revisions and backups. The user explicitly authorized completing all remaining collaboration tasks in this session, superseding the old one-task-per-session instruction.
+
+
 > **Context for AI Agents & Developers**  
 > This document is the single source of truth for the architecture, domain model, user experience, data persistence, and engineering roadmap of the **HLR Writing Tool**. Any autonomous or semi-autonomous AI agent continuing this project must read, align with, and adhere strictly to the conventions and guidelines established here.
 
@@ -13,7 +16,7 @@ The **HLR Writing Tool** is a high-reliability, desktop-based requirements autho
 1. **Air-Gapped & Offline-First**: Must be 100% functional without an internet connection. Both development environment dependencies and binary builds must be installable and runnable on air-gapped Linux and Windows systems.
 2. **Deterministic, Immutable ID Lifecycle**: Requirement and object IDs follow strict hierarchical prefixing and must never change, re-index, or shift when items are deleted.
 3. **Transparent & Human-Readable Persistence**: Workspaces are saved in structured, human-readable files (JSON/YAML) so external tooling, diff viewers, version control systems (Git), and custom data converters can manipulate project data effortlessly.
-4. **Serverless & Local**: Zero external database servers. Fast querying and relationship caching powered by an embedded SQLite engine.
+4. **Offline Local Mode**: No external database server is needed for offline work. Optional multiuser collaboration uses a self-hosted PostgreSQL-backed server. Fast querying and relationship caching powered by an embedded SQLite engine.
 5. **Configurable Schema**: Custom fields/columns for Requirements, Data Dictionaries, Entities, and Actions are configured project-wide.
 
 ### 1.1 Ground Truth: Original Product Owner Seed Prompt

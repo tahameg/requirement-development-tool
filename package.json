@@ -7,7 +7,8 @@
     "build": "tsc && node scripts/build-preload.mjs && vite build",
     "typecheck": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
-    "start": "electron .",
+    "server": "node scripts/run-server.mjs",
+    "start": "electron . --no-sandbox",
     "setup:desktop": "node node_modules/electron/install.js && electron-rebuild -f -w better-sqlite3",
     "test:desktop": "electron tests/integration/electron-smoke.cjs",
     "test:hierarchy": "electron tests/integration/hierarchy-smoke.cjs",
@@ -17,15 +18,19 @@
     "package:appimage": "node scripts/package.mjs linux --target=AppImage",
     "package:deb": "node scripts/package.mjs linux --target=deb",
     "package:windows": "node scripts/package.mjs win32",
-    "package:dir": "node scripts/package.mjs linux --dir"
+    "package:dir": "node scripts/package.mjs linux --dir",
+    "bundle:server": "node scripts/bundle-server.mjs",
+    "test:collaboration": "electron tests/integration/collaboration-smoke.cjs"
   },
   "dependencies": {
     "better-sqlite3": "12.8.0",
     "ini": "5.0.0",
+    "pg": "8.23.1",
     "react": "19.1.0",
     "react-dom": "19.1.0",
     "react-markdown": "10.1.0",
     "remark-gfm": "4.0.1",
+    "ws": "8.22.0",
     "zod": "3.24.2"
   },
   "devDependencies": {
@@ -34,8 +39,10 @@
     "@types/better-sqlite3": "7.6.13",
     "@types/ini": "4.1.1",
     "@types/node": "20.17.24",
+    "@types/pg": "8.23.1",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "@types/ws": "8.18.2",
     "@vitest/coverage-v8": "3.0.8",
     "electron": "40.10.2",
     "electron-builder": "26.0.12",

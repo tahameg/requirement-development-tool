@@ -22,3 +22,7 @@ Bundle preparation uses `tar`; it is included with current Windows installations
 The bundles include application/build dependencies, not an entire operating system. Electron on Linux still needs the host desktop libraries (GTK, NSS, X11/Wayland, audio libraries, glibc) and working Chromium sandbox support. AppImage can be run with `--appimage-extract-and-run` if FUSE is unavailable; do not disable its sandbox. Debian packages declare required system libraries, which must also be available locally to install offline. Windows artifacts target x64 desktop Windows. Unsigned Windows binaries may require local trust approval.
 
 A build produced on Linux does not verify Windows execution. Check the main README for the actual verification status of each artifact. Maintainer metadata describes a local development build; the Debian homepage points to its bundled README instead of inventing a public project website or contact address.
+
+## Collaboration server
+
+Prepare a standalone server using `npm run bundle:server`. It contains pure-JavaScript application dependencies and migration SQL; supply a verified Node.js runtime and offline PostgreSQL packages for the destination OS. The existing development bundle already includes Node. See [server deployment](../docs/collab/DEPLOYMENT.md) for service setup, offline container image transfer and database backup/restore. Full tests require PostgreSQL: set `HLR_TEST_DATABASE_URL` on an offline test machine instead of allowing the test helper to start a Docker image.

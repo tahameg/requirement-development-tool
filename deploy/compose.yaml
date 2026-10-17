@@ -1,0 +1,31 @@
+services:
+  database:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: hlr
+      POSTGRES_USER: hlr
+      POSTGRES_PASSWORD: ${HLR_DB_PASSWORD:?Set HLR_DB_PASSWORD in .env}
+    volumes:
+      - database:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U hlr -d hlr"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+  server:
+    image: hlr-server:0.6.0
+    restart: unless-stopped
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      HLR_DATABASE_URL: ${HLR_DATABASE_URL:?Set URL-encoded PostgreSQL connection string in .env}
+      HLR_SERVER_NO_DISCOVERY: "1"
+    ports:
+      - "8443:8443"
+    volumes:
+      - certificates:/data
+volumes:
+  database:
+  certificates:

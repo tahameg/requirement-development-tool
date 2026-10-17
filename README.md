@@ -72,15 +72,54 @@ npm start
 
 `setup:desktop` is an explicit **connected-machine preparation step**: it downloads the Electron runtime and obtains/builds the SQLite module for Electron's ABI. A source build may require Python and a C++ toolchain (Visual Studio Build Tools on Windows). Package lifecycle scripts are disabled during installation; binary preparation is intentional and separate.
 
-Once prepared, tests, builds and the app work locally without downloading runtime assets. There is no runtime web server. `npm start` loads the built renderer from disk, so rebuild after source changes.
+Once prepared, tests, builds and the app work locally without downloading runtime assets. Offline mode needs no runtime web server; collaboration uses the optional headless server. `npm start` loads the built renderer from disk, so rebuild after source changes.
 
 `npm test` uses Electron's bundled Node runtime so SQLite tests use the same native ABI as the desktop application; do not rebuild SQLite for your system Node runtime afterward. `npm run test:desktop` launches the real Electron window, exercises the UI and preload, and checks project creation/opening, settings, SQLite, reloads and network blocking. It requires a graphical session and creates only disposable test workspaces. Its screenshot is written to the system temporary directory as `hlr-desktop-smoke.png`.
 
-`npm run test:hierarchy` runs a second real-window regression test: all four sidebar roots, nested module/function creation, duplicate-name validation, breadcrumbs, keyboard navigation, search by item ID, properties, ID immutability, deletion confirmation and persistence after reopening. Its screenshot is saved as `hlr-hierarchy-smoke.png` in the system temporary directory. The suite now has 25 unit tests; the original core ID and validation coverage thresholds remain enforced.
+`npm run test:hierarchy` runs a second real-window regression test: all four sidebar roots, nested module/function creation, duplicate-name validation, breadcrumbs, keyboard navigation, search by item ID, properties, ID immutability, deletion confirmation and persistence after reopening. Its screenshot is saved as `hlr-hierarchy-smoke.png` in the system temporary directory. The suite now has 122 automated tests; the original core ID and validation coverage thresholds remain enforced.
 
 `npm run test:authoring` checks required fields, immutable add/edit/delete behavior, safe Markdown, a custom reference column, link navigation, reference deletion protection, full-text search, exports and reloads in the actual desktop UI.
 
 Application settings are written to `$XDG_CONFIG_HOME/hlr-writing-tool/config.ini` (default `~/.config/hlr-writing-tool/config.ini`) on Linux and `%APPDATA%\hlr-writing-tool\config.ini` on Windows. Invalid settings are reported at startup rather than overwritten. No fonts, scripts, icons or styles are loaded from a CDN; the interface uses system fonts.
+
+## Collaboration Server & PostgreSQL
+
+The server component (`npm run server`) provides multi-user real-time room collaboration. Server storage is backed by PostgreSQL using pure-JavaScript `pg` (no native C++ build steps required). Client-side desktop storage remains local SQLite via `better-sqlite3`.
+
+Choose **Connect to server** in the desktop to discover a LAN server or enter its HTTPS address. Verify and trust the certificate fingerprint, claim initial ownership with the server setup token, or sign in/register. Create a room, invite teammates, or request access to listed rooms. Row and scope edits are shared live under session locks; presence shows who is viewing and editing. Offline authoring remains available through **Work offline**.
+
+Changes commit continuously. Administrators can save named revisions, compare history, restore a checkpoint or import a local copy of the same project. Any member can export a local JSON workspace. Disconnected rooms become read-only and preserve the current draft; reconnect either safely resends it or displays a comparison for review.
+
+Run `npm run bundle:server` to produce the headless, pure-JavaScript server distribution in `release/server`. See [deployment and backups](docs/collab/DEPLOYMENT.md) for offline Node/PostgreSQL installation, systemd, Docker Compose, image transfer and database restore. The server does not require Electron or SQLite.
+
+### Server Configuration Flags & Environment Variables
+
+| CLI Flag | Environment Variable | Default | Description |
+|---|---|---|---|
+| `--database-url <url>` | `HLR_DATABASE_URL` / `DATABASE_URL` | *(required)* | PostgreSQL connection string |
+| `--db-pool <count>` | `HLR_DB_POOL` | `10` | Maximum connection pool size |
+| `--migrate-only` | `HLR_MIGRATE_ONLY=1` | `false` | Run advisory-locked database migrations and exit |
+| `--host <host>` | `HLR_SERVER_HOST` | `0.0.0.0` | Bind host address |
+| `--port <port>` | `HLR_SERVER_PORT` | `8443` | Bind port number (`0` for ephemeral) |
+| `--insecure-http` | `HLR_SERVER_INSECURE_HTTP=1` | `false` | Use plain HTTP/WS instead of HTTPS/WSS |
+| `--name <name>` | `HLR_SERVER_NAME` | `HLR Collaboration Server` | Server display name in discovery |
+| `--data-dir <dir>` | `HLR_SERVER_DATA_DIR` | `.hlr-server-data` | Directory for TLS certificates |
+| `--setup-token <tok>` | `HLR_SERVER_SETUP_TOKEN` | *(random)* | Initial setup token for first SERVER_OWNER claim |
+| `--registration-mode` | `HLR_SERVER_REGISTRATION_MODE` | `open` | `open`, `approval`, or `closed` |
+| `--room-creation-mode` | `HLR_SERVER_ROOM_CREATION_MODE` | `all_users` | `all_users` or `admins_only` |
+| `--no-discovery` | `HLR_SERVER_NO_DISCOVERY=1` | `false` | Disable UDP LAN discovery broadcaster |
+| `--discovery-port <p>` | `HLR_SERVER_DISCOVERY_PORT` | `41234` | UDP discovery broadcast target port |
+
+### Test Prerequisites
+
+When running `npm test`:
+- `scripts/run-tests.mjs` automatically invokes `scripts/test-db.mjs` to spawn a disposable `postgres:16-alpine` Docker container on a dynamic port. Each test suite runs in its own isolated PostgreSQL schema with advisory locks and cleans up after itself.
+- If Docker is not available in your environment, export `HLR_TEST_DATABASE_URL` pointing to any accessible PostgreSQL 16+ instance:
+  ```sh
+  export HLR_TEST_DATABASE_URL=postgres://postgres:password@localhost:5432/postgres
+  npm test
+  ```
+  The test helper creates uniquely named schemas (e.g. `test_...`) and drops them on completion without altering other databases.
 
 Linux packaged execution is verified. Windows cross-builds and target-specific offline bundles are prepared here, but their execution and installation must be checked on a Windows x64 desktop.
 
@@ -120,3 +159,5 @@ Loading validates shapes, columns and values, parent references, cycles, uniquen
 Saves validate a complete snapshot before writing. A flushed `.hlr/pending-save.json` stores the intended snapshot before individual JSON files are atomically replaced. Opening the workspace replays an interrupted save. Invalid recovery journals cause an error rather than being silently discarded. This provides process-interruption recovery; full power-loss durability and filesystem fault guarantees are not claimed. Abandoned uniquely named `.tmp` files are ignored.
 
 Use a single writer per workspace. Calls are serialized within this process; cross-process locking and conflict detection for external edits are not implemented. A full snapshot save replaces the workspace's managed files, so reload external changes before saving. Persist a returned transaction before exposing it as committed to the UI. Required values must be provided when committing an item. The editor keeps incomplete new rows in a separate in-memory draft state and protects them against accidental navigation.
+
+`npm run test:collaboration` exercises TLS trust, first-owner setup, room creation, live row editing and revisions through the real Electron UI against a disposable PostgreSQL schema. See [deployment instructions](docs/collab/DEPLOYMENT.md) for the standalone server, offline installation and backups.

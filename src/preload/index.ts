@@ -1,6 +1,8 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import { channels, type DesktopAPI } from '../shared/api.js';
 const api: DesktopAPI = {
+  collab: command => ipcRenderer.invoke('hlr:collab', command),
+  onCollabState: listener => { const handler = (_event: unknown, state: import('../shared/collab/client.js').CollabState) => listener(state); ipcRenderer.on('hlr:collab-state', handler); return () => ipcRenderer.removeListener('hlr:collab-state', handler); },
   editFunction: command => ipcRenderer.invoke(channels.editFunction, command),
   search: query => ipcRenderer.invoke(channels.search, query),
   exportWorkspace: request => ipcRenderer.invoke(channels.exportWorkspace, request),

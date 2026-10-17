@@ -1,3 +1,4 @@
+import type { CollabCommand, CollabState } from './collab/client.js';
 import type { FunctionEdit, ExportRequest, SearchHit } from './authoring.js';
 import type { HierarchyCommand } from './hierarchy.js';
 import type { AppSettings } from './appSettings.js';
@@ -7,6 +8,8 @@ export interface WorkspaceView { root: string; workspace: Workspace; index: { st
 export interface AppState { settings: AppSettings; configPath: string; current: WorkspaceView | null; }
 export type Result<T> = { ok: true; value: T } | { ok: false; error: string };
 export interface DesktopAPI {
+  collab(command: CollabCommand): Promise<Result<any>>;
+  onCollabState(listener: (state: CollabState) => void): () => void;
   editFunction(command: FunctionEdit): Promise<Result<AppState>>;
   search(query: string): Promise<Result<SearchHit[]>>;
   exportWorkspace(request: ExportRequest): Promise<Result<string | null>>;

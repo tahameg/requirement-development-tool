@@ -4,6 +4,7 @@ import type { Workspace } from '../../../shared/types/workspace.js';
 import { objectLabels, type HierarchySelection } from '../../../shared/hierarchy.js';
 export type TreeAction = 'addModule' | 'addFunction' | 'edit' | 'delete';
 interface Props {
+  readOnly?: boolean; allowDelete?: boolean; presence?: Record<string, string>;
   workspace?: Workspace; selected: HierarchySelection | null; busy: boolean;
   onSelect: (selection: HierarchySelection) => void;
   onAction: (action: TreeAction, selection: HierarchySelection) => void;
@@ -14,7 +15,7 @@ export function NodeIcon({ kind }: { kind: HierarchySelection['kind'] }) {
     : <span className="root-icon" aria-hidden="true">≡</span>;
 }
 const selectionKey = (s: HierarchySelection) => s.id ?? s.objectType;
-export function WorkspaceTree({ workspace, selected, busy, onSelect, onAction }: Props) {
+export function WorkspaceTree({ workspace, selected, busy, onSelect, onAction, readOnly = false, allowDelete = true, presence = {} }: Props) {
   const [query, setQuery] = useState('');
   const [focusedKey, setFocusedKey] = useState<string>(objectTypes[0]);
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set(objectTypes));
@@ -47,7 +48,7 @@ export function WorkspaceTree({ workspace, selected, busy, onSelect, onAction }:
     const isExpanded = !!needle || expanded.has(key);
     const canExpand = children.length > 0;
     const active = !!selected && selectionKey(selected) === key;
-    const enabled = !!workspace?.config.objectTypes[selection.objectType].enabled;
+    const enabled = !readOnly && !!workspace?.config.objectTypes[selection.objectType].enabled;
     return <li key={key} role="treeitem" aria-label={label} aria-level={level} aria-selected={active} aria-expanded={canExpand ? isExpanded : undefined} tabIndex={key === focusedKey || !!needle && level === 1 ? 0 : -1}
       onFocus={event => { if ((event.target as HTMLElement).closest('[role=treeitem]') === event.currentTarget) setFocusedKey(key); }}
       data-node-key={key} onKeyDown={event => {
@@ -69,13 +70,13 @@ export function WorkspaceTree({ workspace, selected, busy, onSelect, onAction }:
       }} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); if (!busy) { setMenu(key); } }}>
       <div className={`tree-row${active ? ' active' : ''}`}>
         {canExpand ? <button className="tree-toggle" tabIndex={-1} aria-label={`${isExpanded ? 'Collapse' : 'Expand'} ${label}`} disabled={!!needle} onClick={() => toggle(key)}>{isExpanded ? '⌄' : '›'}</button> : <span className="tree-toggle" />}
-        <button className="tree-select" disabled={busy} tabIndex={-1} onClick={() => onSelect(selection)} title={prefix ? `${label} [${prefix}]` : label}><NodeIcon kind={selection.kind} /><span className="node-name">{label}</span>{prefix && <span className="node-prefix">{prefix}</span>}</button>
+        <button className="tree-select" disabled={busy} tabIndex={-1} onClick={() => onSelect(selection)} title={prefix ? `${label} [${prefix}]` : label}><NodeIcon kind={selection.kind} /><span className="node-name">{label}{presence[key] && <small title={presence[key]}> ● {presence[key]}</small>}</span>{prefix && <span className="node-prefix">{prefix}</span>}</button>
         {enabled && <button className="tree-more" tabIndex={-1} aria-label={`Actions for ${label}`} aria-expanded={menu === key} onClick={() => setMenu(menu === key ? null : key)}>⋯</button>}
       </div>
       {menu === key && enabled && <div className="tree-menu" role="menu" aria-label={`${label} actions`}>
         {selection.kind !== 'function' && <button role="menuitem" onClick={() => { setMenu(null); onAction('addModule', selection); }}>{selection.kind === 'root' ? 'Add module' : 'Add submodule'}</button>}
         {selection.kind === 'module' && <button role="menuitem" onClick={() => { setMenu(null); onAction('addFunction', selection); }}>Add function</button>}
-        {selection.kind !== 'root' && <><button role="menuitem" onClick={() => { setMenu(null); onAction('edit', selection); }}>Rename / Properties</button><button role="menuitem" className="danger-text" onClick={() => { setMenu(null); onAction('delete', selection); }}>Delete</button></>}
+        {selection.kind !== 'root' && <><button role="menuitem" onClick={() => { setMenu(null); onAction('edit', selection); }}>Rename / Properties</button><button hidden={!allowDelete} role="menuitem" className="danger-text" onClick={() => { setMenu(null); onAction('delete', selection); }}>Delete</button></>}
         <button role="menuitem" onClick={() => setMenu(null)}>Close menu</button>
       </div>}
       {canExpand && isExpanded && <ul role="group">{children}</ul>}
