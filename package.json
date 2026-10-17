@@ -8,7 +8,7 @@
     "typecheck": "tsc --noEmit",
     "test": "node scripts/run-tests.mjs",
     "server": "node scripts/run-server.mjs",
-    "start": "electron .",
+    "start": "electron . --no-sandbox",
     "setup:desktop": "node node_modules/electron/install.js && electron-rebuild -f -w better-sqlite3",
     "test:desktop": "electron tests/integration/electron-smoke.cjs",
     "test:hierarchy": "electron tests/integration/hierarchy-smoke.cjs",
