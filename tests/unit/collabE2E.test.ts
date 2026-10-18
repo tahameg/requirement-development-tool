@@ -8,7 +8,7 @@ import { CollabServer } from '../../src/server/httpServer.js';
 import { PgServerStore } from '../../src/server/store/pgStore.js';
 import { CollabClient } from '../../src/main/collab/collabClient.js';
 import { DiscoveryClient } from '../../src/main/collab/discoveryClient.js';
-import { addFunction, addModule, createWorkspace } from '../../src/main/services/workspaceFactory.js';
+import { addRequirementSet, addComponent, createWorkspace } from '../../src/main/services/workspaceFactory.js';
 import { createTestStore } from './testDbHelper.js';
 async function until(check: () => boolean) { for (let i = 0; i < 200; i++) { if (check()) return; await new Promise(r => setTimeout(r, 25)); } throw new Error('Condition not met'); }
 it('runs three users through TLS discovery, joins, editing, locks, revisions, draft conflicts and restart recovery', async () => {
@@ -25,8 +25,8 @@ it('runs three users through TLS discovery, joins, editing, locks, revisions, dr
       const client = clients[i]!; const probe = await client.probe(url); await client.connect(url, probe.fingerprint);
       await client.auth(i === 0 ? 'setup' : 'register', { username: ['owner','editor','viewer'][i], displayName: ['Owner','Editor','Viewer'][i], password: 'password123', ...(i === 0 ? { setupToken: info.setupToken } : {}) });
     }
-    let workspace = addModule(createWorkspace('Shared', 'S'), 'REQUIREMENT', 'Module', 'M'); workspace = addFunction(workspace, 'REQUIREMENT', workspace.domains.REQUIREMENT.modules[0]!.id, 'Function', 'F');
-    const functionId = workspace.domains.REQUIREMENT.functions[0]!.functionId;
+    let workspace = addComponent(createWorkspace('Shared', 'S'), 'REQUIREMENT', 'Module', 'M'); workspace = addRequirementSet(workspace, 'REQUIREMENT', workspace.domains.REQUIREMENT.components[0]!.id, 'Function', 'F');
+    const requirementSetId = workspace.domains.REQUIREMENT.requirementSets[0]!.requirementSetId;
     const { room } = await owner.request('POST', '/api/rooms', { name: 'Shared room', visibility: 'listed', workspace });
     const base = `/api/rooms/${room.id}`;
     const joined = await editor.request('POST', base + '/join-requests', { message: 'Join as editor' });
@@ -35,41 +35,41 @@ it('runs three users through TLS discovery, joins, editing, locks, revisions, dr
     await viewer.request('POST', '/api/invites/redeem', { code: invite.inviteCode.code });
     for (const client of clients) await client.join(room.id);
     await until(() => clients.every(c => c.state().connection === 'connected'));
-    await Promise.all(Array.from({ length: 10 }, (_, i) => clients[i % 2]!.sendOp({ opId: randomUUID(), kind: 'item.add', payload: { objectType: 'REQUIREMENT', functionId, values: { col_desc: `Requirement ${i}` } } })));
+    await Promise.all(Array.from({ length: 10 }, (_, i) => clients[i % 2]!.sendOp({ opId: randomUUID(), kind: 'item.add', payload: { objectType: 'REQUIREMENT', requirementSetId, values: { col_desc: `Requirement ${i}` } } })));
     await until(() => clients.every(c => c.state().seq === 10));
     expect(owner.state().workspace).toEqual(editor.state().workspace); expect(viewer.state().workspace).toEqual(owner.state().workspace);
-    const ids = owner.state().workspace!.domains.REQUIREMENT.functions[0]!.items.map(i => i.id); expect(new Set(ids).size).toBe(10);
+    const ids = owner.state().workspace!.domains.REQUIREMENT.requirementSets[0]!.items.map(i => i.id); expect(new Set(ids).size).toBe(10);
     const itemId = ids[0]!; await owner.lock('force-release', `item:${itemId}`); await owner.lock('acquire', `item:${itemId}`);
     await expect(editor.lock('acquire', `item:${itemId}`)).rejects.toThrow('Owner');
     await expect(viewer.lock('acquire', `item:${itemId}`)).rejects.toThrow('cannot acquire');
-    await expect(viewer.sendOp({ opId: randomUUID(), kind: 'item.add', payload: { objectType: 'REQUIREMENT', functionId, values: { col_desc: 'Forbidden' } } })).rejects.toThrow('read-only');
+    await expect(viewer.sendOp({ opId: randomUUID(), kind: 'item.add', payload: { objectType: 'REQUIREMENT', requirementSetId, values: { col_desc: 'Forbidden' } } })).rejects.toThrow('read-only');
     now += 150;
-    owner.presence({ type: 'presence-update', view: { objectType: 'REQUIREMENT', nodeId: functionId }, focus: { itemId, columnId: 'col_desc' }, drafting: null });
+    owner.presence({ type: 'presence-update', view: { objectType: 'REQUIREMENT', nodeId: requirementSetId }, focus: { itemId, columnId: 'col_desc' }, drafting: null });
     await until(() => editor.state().presence.some(p => p.state.focus?.itemId === itemId));
-    await owner.sendOp({ opId: randomUUID(), kind: 'item.edit', payload: { objectType: 'REQUIREMENT', functionId, itemId, values: { col_desc: 'Live patch' } } });
+    await owner.sendOp({ opId: randomUUID(), kind: 'item.edit', payload: { objectType: 'REQUIREMENT', requirementSetId, itemId, values: { col_desc: 'Live patch' } } });
     await until(() => editor.state().seq === 11);
     const baseline = await owner.request('POST', base + '/revisions', { message: 'Baseline' });
-    await owner.sendOp({ opId: randomUUID(), kind: 'item.add', payload: { objectType: 'REQUIREMENT', functionId, values: { col_desc: 'After baseline' } } });
-    const issuedLater = owner.state().workspace!.domains.REQUIREMENT.functions[0]!.items.at(-1)!.id;
+    await owner.sendOp({ opId: randomUUID(), kind: 'item.add', payload: { objectType: 'REQUIREMENT', requirementSetId, values: { col_desc: 'After baseline' } } });
+    const issuedLater = owner.state().workspace!.domains.REQUIREMENT.requirementSets[0]!.items.at(-1)!.id;
     await expect(editor.request('POST', base + '/revisions', { message: 'Forbidden save' })).rejects.toThrow('admins');
     await owner.request('POST', base + `/revisions/${baseline.revision.id}/restore`, {});
     await until(() => clients.every(c => c.state().seq === 13)); expect(owner.state().workspace!.retiredIds).toContain(issuedLater);
     expect(editor.state().locks).toEqual({});
     // Disconnected draft after grace expires must be surfaced, not silently merged.
     await editor.lock('acquire', `item:${itemId}`);
-    const values = editor.state().workspace!.domains.REQUIREMENT.functions[0]!.items.find(i => i.id === itemId)!.values;
-    editor.setDraft({ objectType: 'REQUIREMENT', functionId, itemId, baseValues: values, values: { ...values, col_desc: 'My unsent draft' } });
+    const values = editor.state().workspace!.domains.REQUIREMENT.requirementSets[0]!.items.find(i => i.id === itemId)!.values;
+    editor.setDraft({ objectType: 'REQUIREMENT', requirementSetId, itemId, baseValues: values, values: { ...values, col_desc: 'My unsent draft' } });
     [...server.wsHandler.wss.clients][1]!.terminate();
     await until(() => editor.state().connection === 'reconnecting'); now += 31000;
     await owner.lock('acquire', `item:${itemId}`);
-    await owner.sendOp({ opId: randomUUID(), kind: 'item.edit', payload: { objectType: 'REQUIREMENT', functionId, itemId, values: { col_desc: 'Other user changed it' } } });
+    await owner.sendOp({ opId: randomUUID(), kind: 'item.edit', payload: { objectType: 'REQUIREMENT', requirementSetId, itemId, values: { col_desc: 'Other user changed it' } } });
     await until(() => !!editor.state().draft?.conflict);
     expect(editor.state().draft!.values.col_desc).toBe('My unsent draft');
-    expect(editor.state().workspace!.domains.REQUIREMENT.functions[0]!.items.find(i => i.id === itemId)!.values.col_desc).toBe('Other user changed it');
+    expect(editor.state().workspace!.domains.REQUIREMENT.requirementSets[0]!.items.find(i => i.id === itemId)!.values.col_desc).toBe('Other user changed it');
     // A deleted row must also retain the unsent draft for review on rejoin.
     editor.setDraft({ ...editor.state().draft!, conflict: undefined });
     editor.leave();
-    await owner.sendOp({ opId: randomUUID(), kind: 'item.delete', payload: { objectType: 'REQUIREMENT', functionId, itemId } });
+    await owner.sendOp({ opId: randomUUID(), kind: 'item.delete', payload: { objectType: 'REQUIREMENT', requirementSetId, itemId } });
     await editor.join(room.id);
     await until(() => !!editor.state().draft?.conflict);
     expect(editor.state().draft!.conflict).toContain('deleted');

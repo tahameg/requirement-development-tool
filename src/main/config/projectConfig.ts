@@ -13,7 +13,7 @@ export function updateProjectConfig(workspace: Workspace, input: unknown): Works
       const replacement = columns.find(c => c.id === system.id);
       if (!replacement || !replacement.system || replacement.type !== system.type || replacement.required !== system.required) throw new Error(`Cannot remove or change the type/required rule of system column ${system.name}`);
     }
-    for (const fn of next.domains[type].functions) for (const item of fn.items) {
+    for (const fn of next.domains[type].requirementSets) for (const item of fn.items) {
       const old = item.values;
       item.values = Object.fromEntries(columns.flatMap(column => {
         const value = old[column.id] === undefined ? column.default : old[column.id];

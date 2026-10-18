@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { CollabServer } from '../../src/server/httpServer.js';
 import { CollabClient } from '../../src/main/collab/collabClient.js';
 import { TlsPinning, serverAddress } from '../../src/main/collab/tlsPinning.js';
-import { addFunction, addModule, createWorkspace } from '../../src/main/services/workspaceFactory.js';
+import { addRequirementSet, addComponent, createWorkspace } from '../../src/main/services/workspaceFactory.js';
 import { createTestStore } from './testDbHelper.js';
 const cleanup: Array<() => Promise<void> | void> = [];
 afterEach(async () => { while (cleanup.length) await cleanup.pop()!(); });
@@ -20,18 +20,18 @@ async function fixture() {
   const probe = await client.probe(server.getBaseUrl()); await client.connect(probe.address, probe.fingerprint);
   expect(client.state().server?.setupRequired).toBe(true);
   await client.auth('setup', { setupToken: info.setupToken!, username: 'owner', displayName: 'Owner', password: 'password123' });
-  let workspace = addModule(createWorkspace('Team', 'T'), 'REQUIREMENT', 'Module', 'M'); workspace = addFunction(workspace, 'REQUIREMENT', workspace.domains.REQUIREMENT.modules[0]!.id, 'Function', 'F');
+  let workspace = addComponent(createWorkspace('Team', 'T'), 'REQUIREMENT', 'Module', 'M'); workspace = addRequirementSet(workspace, 'REQUIREMENT', workspace.domains.REQUIREMENT.components[0]!.id, 'Function', 'F');
   const { room } = await client.request('POST', '/api/rooms', { name: 'Team', visibility: 'listed', workspace });
   await client.join(room.id); await until(() => client.state().connection === 'connected');
-  return { client, server, dir, room, functionId: workspace.domains.REQUIREMENT.functions[0]!.functionId };
+  return { client, server, dir, room, requirementSetId: workspace.domains.REQUIREMENT.requirementSets[0]!.requirementSetId };
 }
 describe('desktop collaboration transport', () => {
   it('pins certificates before credentials, mirrors operations, and round-trips revisions over HTTPS', async () => {
-    const { client, server, room, functionId } = await fixture();
-    const payload = { objectType: 'REQUIREMENT' as const, functionId, values: { col_desc: 'Shared' } };
+    const { client, server, room, requirementSetId } = await fixture();
+    const payload = { objectType: 'REQUIREMENT' as const, requirementSetId, values: { col_desc: 'Shared' } };
     await client.sendOp({ opId: randomUUID(), kind: 'item.add', payload });
     expect(client.state().seq).toBe(1);
-    const id = client.state().workspace!.domains.REQUIREMENT.functions[0]!.items[0]!.id;
+    const id = client.state().workspace!.domains.REQUIREMENT.requirementSets[0]!.items[0]!.id;
     await client.lock('acquire', `item:${id}`);
     const saved = await client.request('POST', `/api/rooms/${room.id}/revisions`, { message: 'Baseline' });
     await client.sendOp({ opId: randomUUID(), kind: 'item.edit', payload: { ...payload, itemId: id, values: { col_desc: 'Changed' } } });
@@ -41,7 +41,7 @@ describe('desktop collaboration transport', () => {
     await expect(client.request('GET', `/api/rooms/${room.id}/revisions/${saved.revision.id}/diff?to=missing`)).rejects.toThrow('Comparison revision not found');
     await client.request('POST', `/api/rooms/${room.id}/revisions/${saved.revision.id}/restore`, {});
     await until(() => client.state().seq === 3);
-    expect(client.state().workspace!.domains.REQUIREMENT.functions[0]!.items[0]!.values.col_desc).toBe('Shared');
+    expect(client.state().workspace!.domains.REQUIREMENT.requirementSets[0]!.items[0]!.values.col_desc).toBe('Shared');
     expect(client.state().locks).toEqual({});
     expect((await client.request('GET', `/api/rooms/${room.id}/revisions`)).revisions).toHaveLength(3);
     // A pin mismatch must reject before a password-bearing HTTP request is written.
@@ -53,15 +53,15 @@ describe('desktop collaboration transport', () => {
     expect(client.state().user?.username).toBe('owner');
   });
   it('keeps session locks through a blip and safely resends an unchanged draft', async () => {
-    const { client, server, functionId } = await fixture();
-    await client.sendOp({ opId: randomUUID(), kind: 'item.add', payload: { objectType: 'REQUIREMENT', functionId, values: { col_desc: 'Initial' } } });
-    const item = client.state().workspace!.domains.REQUIREMENT.functions[0]!.items[0]!;
+    const { client, server, requirementSetId } = await fixture();
+    await client.sendOp({ opId: randomUUID(), kind: 'item.add', payload: { objectType: 'REQUIREMENT', requirementSetId, values: { col_desc: 'Initial' } } });
+    const item = client.state().workspace!.domains.REQUIREMENT.requirementSets[0]!.items[0]!;
     await client.lock('acquire', `item:${item.id}`);
-    client.setDraft({ objectType: 'REQUIREMENT', functionId, itemId: item.id, baseValues: item.values, values: { ...item.values, col_desc: 'Preserved draft' } });
+    client.setDraft({ objectType: 'REQUIREMENT', requirementSetId, itemId: item.id, baseValues: item.values, values: { ...item.values, col_desc: 'Preserved draft' } });
     for (const ws of server.wsHandler.wss.clients) ws.terminate();
     await until(() => client.state().connection === 'reconnecting');
     await until(() => client.state().seq === 2 && client.state().draft === null);
-    expect(client.state().workspace!.domains.REQUIREMENT.functions[0]!.items[0]!.values.col_desc).toBe('Preserved draft');
+    expect(client.state().workspace!.domains.REQUIREMENT.requirementSets[0]!.items[0]!.values.col_desc).toBe('Preserved draft');
   });
   it('validates origins and persists pins without session credentials', () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'hlr-pins-')); cleanup.push(() => rmSync(dir, { recursive: true, force: true }));

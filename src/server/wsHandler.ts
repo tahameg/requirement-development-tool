@@ -267,6 +267,7 @@ export class CollabWsHandler {
           view: msg.view,
           focus: msg.focus,
           drafting: msg.drafting,
+          creating: msg.creating ?? null,
         });
         break;
 

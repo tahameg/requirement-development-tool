@@ -1,5 +1,12 @@
 # Multi-User Collaboration Protocol & Data Shapes
 
+> **Protocol v2 (2026-10-18).** `src/shared/collab/protocol.ts` and `src/shared/collab/types.ts` are authoritative; the message listings below predate several field renames. v2 changes:
+> - `ServerPublicInfo.protocolVersion` (= `COLLAB_PROTOCOL_VERSION`, 2). The desktop refuses to connect to a server that reports a different version.
+> - Terminology: op kind `requirementSet.description` (was `function.description`); payloads use `requirementSetId` (was `functionId`); hierarchy actions `addComponent` / `editComponent` / `deleteComponent` / `addRequirementSet` / `editRequirementSet` / `deleteRequirementSet`; lock key `rs-desc:<requirementSetId>` (was `fn-desc:`); export query `requirementSetId`. Stored `room_ops` rows and snapshots with the old names are upgraded on read.
+> - `LockHolder.sessionKey`: an opaque per-session id. `room-welcome` carries the receiver's own `sessionKey` and `connectionId`. Clients compare lock ownership by `sessionKey`, never `userId`, so the same account in two windows is two holders.
+> - `PresenceState.creating` (optional): `{ objectType, kind: 'component' | 'requirementSet', parentId, name }` while a user names a new node. Peers render it as a ghost. Viewers' value is cleared.
+> - Settings sessions: while one session holds the `config` lock, the server rejects every other session's op (except `config.update` / `room.restore`) with `LOCKED`. After `config.update`, the client drops draft values for removed columns and reports the change (`CollabState.settingsChange`).
+
 This document specifies the wire protocols, REST API endpoints, WebSocket message types, Yjs CRDT document layout, Awareness state schema, UDP discovery beacon format, and server SQLite schema.
 
 ---
@@ -73,7 +80,7 @@ This document specifies the wire protocols, REST API endpoints, WebSocket messag
 | `POST /api/rooms/:roomId/members/:userId/ban` | `ROOM_OWNER`, `ROOM_ADMIN` | `{ reason?: string }` | `{ banned: true }` | `403`, `404` |
 | `DELETE /api/rooms/:roomId/bans/:userId` | `ROOM_OWNER`, `ROOM_ADMIN` | — | `{ unbanned: true }` | `403`, `404` |
 | `GET /api/rooms/:roomId/audit` | `ROOM_OWNER`, `ROOM_ADMIN` | — | `{ entries: AuditEntry[] }` | `403`, `404` |
-| `GET /api/rooms/:roomId/export` | `ROOM_OWNER`, `ROOM_ADMIN`, `EDITOR`, `VIEWER` | Query `?format=json\|csv\|markdown&objectType=...&functionId=...` | `{ format, content: string \| Workspace }` | `400`, `403`, `404` |
+| `GET /api/rooms/:roomId/export` | `ROOM_OWNER`, `ROOM_ADMIN`, `EDITOR`, `VIEWER` | Query `?format=json\|csv\|markdown&objectType=...&requirementSetId=...` | `{ format, content: string \| Workspace }` | `400`, `403`, `404` |
 
 ### 2.4 Revisions Endpoints
 

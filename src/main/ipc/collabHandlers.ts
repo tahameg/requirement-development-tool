@@ -29,6 +29,7 @@ export function registerCollabHandlers(window: BrowserWindow, client: CollabClie
         case 'presence': { const { action, ...state } = command; client.presence({ type: 'presence-update', ...state }); break; }
         case 'draft': client.setDraft(command.draft); break;
         case 'clear-draft': client.setDraft(null); break;
+        case 'ack-settings-change': client.ackSettingsChange(); break;
         case 'leave': client.leave(); break;
         case 'disconnect': await client.logout(); break;
         case 'export': {

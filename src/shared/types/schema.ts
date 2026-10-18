@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { migrateWorkspace } from './legacy.js';
 
 export const objectTypes = ['REQUIREMENT', 'DATA_DICTIONARY', 'ENTITY', 'ACTION'] as const;
 export const objectTypeSchema = z.enum(objectTypes);
@@ -22,22 +23,23 @@ export const projectConfigSchema = z.object({
   objectTypes: z.object({ REQUIREMENT: objectConfigSchema, DATA_DICTIONARY: objectConfigSchema,
     ENTITY: objectConfigSchema, ACTION: objectConfigSchema }).strict(),
 }).strict();
-export const moduleSchema = z.object({
+export const componentSchema = z.object({
   id: key, name, prefix: token, description: z.string(), parentId: key.nullable(),
 }).strict();
 export const itemSchema = z.object({
   id: key, seq: counter.refine(n => n > 0), created_at: z.string().datetime(),
   updated_at: z.string().datetime().optional(), values: z.record(value),
 }).strict();
-export const functionSchema = z.object({
-  functionId: key.regex(/^fn_[a-zA-Z0-9_-]+$/), name, prefix: token.min(1),
-  modulePath: z.array(name), parentModuleId: key, description: z.string(),
+export const requirementSetSchema = z.object({
+  // fn_ ids predate requirement sets and are kept so stored references stay valid.
+  requirementSetId: key.regex(/^(?:rs|fn)_[a-zA-Z0-9_-]+$/), name, prefix: token.min(1),
+  componentPath: z.array(name), parentComponentId: key, description: z.string(),
   watermarkCounter: counter, items: z.array(itemSchema),
 }).strict();
-const domainSchema = z.object({ modules: z.array(moduleSchema), functions: z.array(functionSchema) }).strict();
-export const workspaceSchema = z.object({
+const domainSchema = z.object({ components: z.array(componentSchema), requirementSets: z.array(requirementSetSchema) }).strict();
+export const workspaceSchema = z.preprocess(migrateWorkspace, z.object({
   config: projectConfigSchema,
   domains: z.object({ REQUIREMENT: domainSchema, DATA_DICTIONARY: domainSchema,
     ENTITY: domainSchema, ACTION: domainSchema }).strict(),
   retiredIds: z.array(key),
-}).strict();
+}).strict());

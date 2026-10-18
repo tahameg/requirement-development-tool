@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { addItem } from '../../src/main/services/idGenerator.js';
-import { addFunction, addModule, createWorkspace } from '../../src/main/services/workspaceFactory.js';
+import { addRequirementSet, addComponent, createWorkspace } from '../../src/main/services/workspaceFactory.js';
 import {
   authorizeOp,
   canRoomAction,
@@ -175,42 +175,42 @@ describe('Room-Level Permission Matrix (RoomRole x RoomAction)', () => {
       'item:create': { nonMember: false, VIEWER: false, EDITOR: true, ROOM_ADMIN: true, ROOM_OWNER: true },
       'item:edit': { nonMember: false, VIEWER: false, EDITOR: true, ROOM_ADMIN: true, ROOM_OWNER: true },
       'item:delete': { nonMember: false, VIEWER: false, EDITOR: true, ROOM_ADMIN: true, ROOM_OWNER: true },
-      'hierarchy:create-module': {
+      'hierarchy:create-component': {
         nonMember: false,
         VIEWER: false,
         EDITOR: true,
         ROOM_ADMIN: true,
         ROOM_OWNER: true,
       },
-      'hierarchy:edit-module': {
+      'hierarchy:edit-component': {
         nonMember: false,
         VIEWER: false,
         EDITOR: true,
         ROOM_ADMIN: true,
         ROOM_OWNER: true,
       },
-      'hierarchy:create-function': {
+      'hierarchy:create-requirement-set': {
         nonMember: false,
         VIEWER: false,
         EDITOR: true,
         ROOM_ADMIN: true,
         ROOM_OWNER: true,
       },
-      'hierarchy:edit-function': {
+      'hierarchy:edit-requirement-set': {
         nonMember: false,
         VIEWER: false,
         EDITOR: true,
         ROOM_ADMIN: true,
         ROOM_OWNER: true,
       },
-      'hierarchy:delete-module': {
+      'hierarchy:delete-component': {
         nonMember: false,
         VIEWER: false,
         EDITOR: false,
         ROOM_ADMIN: true,
         ROOM_OWNER: true,
       },
-      'hierarchy:delete-function': {
+      'hierarchy:delete-requirement-set': {
         nonMember: false,
         VIEWER: false,
         EDITOR: false,
@@ -383,22 +383,22 @@ describe('authorizeOp', () => {
 
   function buildSampleWorkspace() {
     let ws = createWorkspace('Avionics', 'AV');
-    ws = addModule(ws, 'REQUIREMENT', 'Navigation', 'NAV', null);
-    const modId = ws.domains.REQUIREMENT.modules[0]!.id;
-    ws = addFunction(ws, 'REQUIREMENT', modId, 'Autopilot', 'AP');
-    const fnId = ws.domains.REQUIREMENT.functions[0]!.functionId;
+    ws = addComponent(ws, 'REQUIREMENT', 'Navigation', 'NAV', null);
+    const modId = ws.domains.REQUIREMENT.components[0]!.id;
+    ws = addRequirementSet(ws, 'REQUIREMENT', modId, 'Autopilot', 'AP');
+    const fnId = ws.domains.REQUIREMENT.requirementSets[0]!.requirementSetId;
     ws = addItem(ws, 'REQUIREMENT', fnId, { col_desc: 'The system shall maintain altitude.' });
     ws = addItem(ws, 'REQUIREMENT', fnId, { col_desc: 'The system shall maintain heading.' });
-    const item1Id = ws.domains.REQUIREMENT.functions[0]!.items[0]!.id;
-    const item2Id = ws.domains.REQUIREMENT.functions[0]!.items[1]!.id;
+    const item1Id = ws.domains.REQUIREMENT.requirementSets[0]!.items[0]!.id;
+    const item2Id = ws.domains.REQUIREMENT.requirementSets[0]!.items[1]!.id;
 
     // Submodule with child function and child item
-    ws = addModule(ws, 'REQUIREMENT', 'FlightManagement', 'FMS', modId);
-    const subModId = ws.domains.REQUIREMENT.modules[1]!.id;
-    ws = addFunction(ws, 'REQUIREMENT', subModId, 'RoutePlan', 'RP');
-    const subFnId = ws.domains.REQUIREMENT.functions[1]!.functionId;
+    ws = addComponent(ws, 'REQUIREMENT', 'FlightManagement', 'FMS', modId);
+    const subModId = ws.domains.REQUIREMENT.components[1]!.id;
+    ws = addRequirementSet(ws, 'REQUIREMENT', subModId, 'RoutePlan', 'RP');
+    const subFnId = ws.domains.REQUIREMENT.requirementSets[1]!.requirementSetId;
     ws = addItem(ws, 'REQUIREMENT', subFnId, { col_desc: 'The system shall store waypoints.' });
-    const subItemId = ws.domains.REQUIREMENT.functions[1]!.items[0]!.id;
+    const subItemId = ws.domains.REQUIREMENT.requirementSets[1]!.items[0]!.id;
 
     return { ws, modId, fnId, item1Id, item2Id, subModId, subFnId, subItemId };
   }
@@ -410,37 +410,37 @@ describe('authorizeOp', () => {
       {
         opId: 'op_1',
         kind: 'hierarchy',
-        payload: { objectType: 'REQUIREMENT', action: 'addModule', parentId: null, name: 'NewMod', prefix: 'NM', description: '' },
+        payload: { objectType: 'REQUIREMENT', action: 'addComponent', parentId: null, name: 'NewMod', prefix: 'NM', description: '' },
       },
       {
         opId: 'op_2',
         kind: 'hierarchy',
-        payload: { objectType: 'REQUIREMENT', action: 'editModule', id: modId, name: 'Renamed', prefix: 'NAV', description: '' },
+        payload: { objectType: 'REQUIREMENT', action: 'editComponent', id: modId, name: 'Renamed', prefix: 'NAV', description: '' },
       },
       {
         opId: 'op_3',
         kind: 'hierarchy',
-        payload: { objectType: 'REQUIREMENT', action: 'deleteModule', id: modId },
+        payload: { objectType: 'REQUIREMENT', action: 'deleteComponent', id: modId },
       },
       {
         opId: 'op_4',
         kind: 'item.add',
-        payload: { objectType: 'REQUIREMENT', functionId: fnId, values: { col_desc: 'New requirement' } },
+        payload: { objectType: 'REQUIREMENT', requirementSetId: fnId, values: { col_desc: 'New requirement' } },
       },
       {
         opId: 'op_5',
         kind: 'item.edit',
-        payload: { objectType: 'REQUIREMENT', functionId: fnId, itemId: item1Id, values: { col_desc: 'Edited requirement' } },
+        payload: { objectType: 'REQUIREMENT', requirementSetId: fnId, itemId: item1Id, values: { col_desc: 'Edited requirement' } },
       },
       {
         opId: 'op_6',
         kind: 'item.delete',
-        payload: { objectType: 'REQUIREMENT', functionId: fnId, itemId: item1Id },
+        payload: { objectType: 'REQUIREMENT', requirementSetId: fnId, itemId: item1Id },
       },
       {
         opId: 'op_7',
-        kind: 'function.description',
-        payload: { objectType: 'REQUIREMENT', functionId: fnId, description: 'Updated scope' },
+        kind: 'requirementSet.description',
+        payload: { objectType: 'REQUIREMENT', requirementSetId: fnId, description: 'Updated scope' },
       },
       {
         opId: 'op_8',
@@ -471,7 +471,7 @@ describe('authorizeOp', () => {
     const addOp: CollabOp = {
       opId: 'op_add',
       kind: 'item.add',
-      payload: { objectType: 'REQUIREMENT', functionId: fnId, values: { col_desc: 'New req' } },
+      payload: { objectType: 'REQUIREMENT', requirementSetId: fnId, values: { col_desc: 'New req' } },
     };
     expect(authorizeOp('EDITOR', addOp, {}, ws, alice.userId)).toEqual({ ok: true });
 
@@ -479,7 +479,7 @@ describe('authorizeOp', () => {
     const editOp: CollabOp = {
       opId: 'op_edit',
       kind: 'item.edit',
-      payload: { objectType: 'REQUIREMENT', functionId: fnId, itemId: item1Id, values: { col_desc: 'Edited' } },
+      payload: { objectType: 'REQUIREMENT', requirementSetId: fnId, itemId: item1Id, values: { col_desc: 'Edited' } },
     };
     expect(authorizeOp('EDITOR', editOp, { [`item:${item1Id}`]: alice }, ws, alice.userId)).toEqual({ ok: true });
 
@@ -506,7 +506,7 @@ describe('authorizeOp', () => {
     const delOp: CollabOp = {
       opId: 'op_del',
       kind: 'item.delete',
-      payload: { objectType: 'REQUIREMENT', functionId: fnId, itemId: item1Id },
+      payload: { objectType: 'REQUIREMENT', requirementSetId: fnId, itemId: item1Id },
     };
 
     // Free -> allowed
@@ -529,27 +529,27 @@ describe('authorizeOp', () => {
 
     const descOp: CollabOp = {
       opId: 'op_desc',
-      kind: 'function.description',
-      payload: { objectType: 'REQUIREMENT', functionId: fnId, description: 'Updated markdown' },
+      kind: 'requirementSet.description',
+      payload: { objectType: 'REQUIREMENT', requirementSetId: fnId, description: 'Updated markdown' },
     };
 
     // Caller holds fn-desc -> allowed
-    expect(authorizeOp('EDITOR', descOp, { [`fn-desc:${fnId}`]: alice }, ws, alice.userId)).toEqual({ ok: true });
+    expect(authorizeOp('EDITOR', descOp, { [`rs-desc:${fnId}`]: alice }, ws, alice.userId)).toEqual({ ok: true });
 
     // Free -> rejected with LOCKED
     expect(authorizeOp('EDITOR', descOp, {}, ws, alice.userId)).toEqual({
       ok: false,
       code: 'LOCKED',
       targetId: fnId,
-      message: `Operation requires lock 'fn-desc:${fnId}'.`,
+      message: `Operation requires lock 'rs-desc:${fnId}'.`,
     });
 
     // Held by other -> rejected with LOCKED
-    expect(authorizeOp('EDITOR', descOp, { [`fn-desc:${fnId}`]: bob }, ws, alice.userId)).toEqual({
+    expect(authorizeOp('EDITOR', descOp, { [`rs-desc:${fnId}`]: bob }, ws, alice.userId)).toEqual({
       ok: false,
       code: 'LOCKED',
       targetId: fnId,
-      message: `Operation requires lock 'fn-desc:${fnId}'.`,
+      message: `Operation requires lock 'rs-desc:${fnId}'.`,
     });
   });
 
@@ -580,30 +580,30 @@ describe('authorizeOp', () => {
       message: expect.stringContaining('restore revisions'),
     });
 
-    // deleteModule
+    // deleteComponent
     const delModOp: CollabOp = {
       opId: 'op_dm',
       kind: 'hierarchy',
-      payload: { objectType: 'REQUIREMENT', action: 'deleteModule', id: modId },
+      payload: { objectType: 'REQUIREMENT', action: 'deleteComponent', id: modId },
     };
     expect(authorizeOp('EDITOR', delModOp, {}, ws, alice.userId)).toEqual({
       ok: false,
       code: 'FORBIDDEN',
       targetId: modId,
-      message: expect.stringContaining('delete module'),
+      message: expect.stringContaining('delete component'),
     });
 
-    // deleteFunction
+    // deleteRequirementSet
     const delFnOp: CollabOp = {
       opId: 'op_df',
       kind: 'hierarchy',
-      payload: { objectType: 'REQUIREMENT', action: 'deleteFunction', id: fnId },
+      payload: { objectType: 'REQUIREMENT', action: 'deleteRequirementSet', id: fnId },
     };
     expect(authorizeOp('EDITOR', delFnOp, {}, ws, alice.userId)).toEqual({
       ok: false,
       code: 'FORBIDDEN',
       targetId: fnId,
-      message: expect.stringContaining('delete function'),
+      message: expect.stringContaining('delete requirement set'),
     });
   });
 
@@ -661,18 +661,18 @@ describe('authorizeOp', () => {
     expect(authorizeOp('ROOM_OWNER', restoreOp, {}, ws, alice.userId)).toEqual({ ok: true });
   });
 
-  it('enforces hierarchy editing locks: editModule and editFunction require node lock held or free', () => {
+  it('enforces hierarchy editing locks: editComponent and authorRequirementSet require node lock held or free', () => {
     const { ws, modId, fnId } = buildSampleWorkspace();
 
     const editModOp: CollabOp = {
       opId: 'op_em',
       kind: 'hierarchy',
-      payload: { objectType: 'REQUIREMENT', action: 'editModule', id: modId, name: 'NAV2', prefix: 'N2', description: '' },
+      payload: { objectType: 'REQUIREMENT', action: 'editComponent', id: modId, name: 'NAV2', prefix: 'N2', description: '' },
     };
     const editFnOp: CollabOp = {
       opId: 'op_ef',
       kind: 'hierarchy',
-      payload: { objectType: 'REQUIREMENT', action: 'editFunction', id: fnId, name: 'AP2', prefix: 'A2', description: '' },
+      payload: { objectType: 'REQUIREMENT', action: 'editRequirementSet', id: fnId, name: 'AP2', prefix: 'A2', description: '' },
     };
 
     // Free -> allowed
@@ -698,13 +698,13 @@ describe('authorizeOp', () => {
     });
   });
 
-  it('rejects deleteFunction if another user holds a lock anywhere in the function subtree', () => {
+  it('rejects deleteRequirementSet if another user holds a lock anywhere in the function subtree', () => {
     const { ws, fnId, item1Id } = buildSampleWorkspace();
 
     const delFnOp: CollabOp = {
       opId: 'op_df',
       kind: 'hierarchy',
-      payload: { objectType: 'REQUIREMENT', action: 'deleteFunction', id: fnId },
+      payload: { objectType: 'REQUIREMENT', action: 'deleteRequirementSet', id: fnId },
     };
 
     // Free subtree -> allowed for ROOM_ADMIN
@@ -717,7 +717,7 @@ describe('authorizeOp', () => {
         delFnOp,
         {
           [`node:${fnId}`]: alice,
-          [`fn-desc:${fnId}`]: alice,
+          [`rs-desc:${fnId}`]: alice,
           [`item:${item1Id}`]: alice,
         },
         ws,
@@ -734,11 +734,11 @@ describe('authorizeOp', () => {
     });
 
     // Other holds fn-desc lock -> rejected with LOCKED
-    expect(authorizeOp('ROOM_ADMIN', delFnOp, { [`fn-desc:${fnId}`]: bob }, ws, alice.userId)).toEqual({
+    expect(authorizeOp('ROOM_ADMIN', delFnOp, { [`rs-desc:${fnId}`]: bob }, ws, alice.userId)).toEqual({
       ok: false,
       code: 'LOCKED',
       targetId: fnId,
-      message: `Cannot delete function '${fnId}' while locks are held in its subtree.`,
+      message: `Cannot delete requirement set '${fnId}' while locks are held in its subtree.`,
     });
 
     // Other holds item lock inside function -> rejected with LOCKED
@@ -746,17 +746,17 @@ describe('authorizeOp', () => {
       ok: false,
       code: 'LOCKED',
       targetId: item1Id,
-      message: `Cannot delete function '${fnId}' while locks are held in its subtree.`,
+      message: `Cannot delete requirement set '${fnId}' while locks are held in its subtree.`,
     });
   });
 
-  it('rejects deleteModule if another user holds a lock anywhere in the module subtree (submodules, functions, items)', () => {
+  it('rejects deleteComponent if another user holds a lock anywhere in the module subtree (submodules, requirementSets, items)', () => {
     const { ws, modId, subModId, fnId, subFnId, item1Id, subItemId } = buildSampleWorkspace();
 
     const delModOp: CollabOp = {
       opId: 'op_dm',
       kind: 'hierarchy',
-      payload: { objectType: 'REQUIREMENT', action: 'deleteModule', id: modId },
+      payload: { objectType: 'REQUIREMENT', action: 'deleteComponent', id: modId },
     };
 
     // Free subtree -> allowed for ROOM_OWNER
@@ -771,7 +771,7 @@ describe('authorizeOp', () => {
           [`node:${modId}`]: alice,
           [`node:${subModId}`]: alice,
           [`node:${fnId}`]: alice,
-          [`fn-desc:${fnId}`]: alice,
+          [`rs-desc:${fnId}`]: alice,
           [`item:${item1Id}`]: alice,
           [`node:${subFnId}`]: alice,
           [`item:${subItemId}`]: alice,
@@ -794,7 +794,7 @@ describe('authorizeOp', () => {
       ok: false,
       code: 'LOCKED',
       targetId: subModId,
-      message: `Cannot delete module '${modId}' while locks are held in its subtree.`,
+      message: `Cannot delete component '${modId}' while locks are held in its subtree.`,
     });
 
     // Other holds function lock in module -> rejected
@@ -802,15 +802,15 @@ describe('authorizeOp', () => {
       ok: false,
       code: 'LOCKED',
       targetId: fnId,
-      message: `Cannot delete module '${modId}' while locks are held in its subtree.`,
+      message: `Cannot delete component '${modId}' while locks are held in its subtree.`,
     });
 
     // Other holds fn-desc lock in module -> rejected
-    expect(authorizeOp('ROOM_OWNER', delModOp, { [`fn-desc:${fnId}`]: bob }, ws, alice.userId)).toEqual({
+    expect(authorizeOp('ROOM_OWNER', delModOp, { [`rs-desc:${fnId}`]: bob }, ws, alice.userId)).toEqual({
       ok: false,
       code: 'LOCKED',
       targetId: fnId,
-      message: `Cannot delete module '${modId}' while locks are held in its subtree.`,
+      message: `Cannot delete component '${modId}' while locks are held in its subtree.`,
     });
 
     // Other holds item lock in module function -> rejected
@@ -818,7 +818,7 @@ describe('authorizeOp', () => {
       ok: false,
       code: 'LOCKED',
       targetId: item1Id,
-      message: `Cannot delete module '${modId}' while locks are held in its subtree.`,
+      message: `Cannot delete component '${modId}' while locks are held in its subtree.`,
     });
 
     // Other holds item lock in child submodule function -> rejected
@@ -826,7 +826,7 @@ describe('authorizeOp', () => {
       ok: false,
       code: 'LOCKED',
       targetId: subItemId,
-      message: `Cannot delete module '${modId}' while locks are held in its subtree.`,
+      message: `Cannot delete component '${modId}' while locks are held in its subtree.`,
     });
   });
 
@@ -841,7 +841,7 @@ describe('authorizeOp', () => {
     const delOp: CollabOp = {
       opId: 'op_del',
       kind: 'item.delete',
-      payload: { objectType: 'REQUIREMENT', functionId: fnId, itemId: item1Id },
+      payload: { objectType: 'REQUIREMENT', requirementSetId: fnId, itemId: item1Id },
     };
 
     // Item delete allowed because bob's lock has expired
@@ -853,7 +853,7 @@ describe('authorizeOp', () => {
     const editOp: CollabOp = {
       opId: 'op_edit',
       kind: 'item.edit',
-      payload: { objectType: 'REQUIREMENT', functionId: fnId, itemId: item1Id, values: { col_desc: 'Test' } },
+      payload: { objectType: 'REQUIREMENT', requirementSetId: fnId, itemId: item1Id, values: { col_desc: 'Test' } },
     };
     expect(authorizeOp('EDITOR', editOp, { [`item:${item1Id}`]: expiredLock }, ws, alice.userId)).toEqual({
       ok: false,

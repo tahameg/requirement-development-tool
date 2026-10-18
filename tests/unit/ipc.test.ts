@@ -23,7 +23,7 @@ it('allows only the trusted main frame, validates inputs, handles cancellations 
   expect((await handlers.get(channels.createProject)!(event, 'X', '../')).ok).toBe(false);
   dialog.showSaveDialog.mockResolvedValue({ canceled: false, filePath: '/new' });
   await handlers.get(channels.createProject)!(event, 'Project', 'GS'); expect(service.create).toHaveBeenCalledWith('/new', 'Project', 'GS');
-  await handlers.get(channels.changeHierarchy)!(event, { action: 'addModule' }); expect(service.changeHierarchy).toHaveBeenCalledWith({ action: 'addModule' });
+  await handlers.get(channels.changeHierarchy)!(event, { action: 'addComponent' }); expect(service.changeHierarchy).toHaveBeenCalledWith({ action: 'addComponent' });
   await handlers.get(channels.updateProject)!(event, { projectName: 'X' }); expect(service.updateProject).toHaveBeenCalled();
   await handlers.get(channels.saveSettings)!(event, {}); expect(service.saveSettings).toHaveBeenCalled();
   let finish!: () => void; service.save.mockImplementation(() => new Promise<void>(resolve => { finish = resolve; }));

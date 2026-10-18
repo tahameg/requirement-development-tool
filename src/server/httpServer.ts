@@ -4,6 +4,7 @@ import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import https from 'node:https';
 import type { AddressInfo } from 'node:net';
 import {
+  COLLAB_PROTOCOL_VERSION,
   DEFAULT_DISCOVERY_PORT,
   DEFAULT_SERVER_PORT,
   type ApiErrorCode,
@@ -277,6 +278,7 @@ export class CollabServer {
   getPublicInfo(): ServerPublicInfo {
     return {
       serverId: this.cachedSettings?.serverId ?? 'srv_unknown',
+      protocolVersion: COLLAB_PROTOCOL_VERSION,
       name: this.cachedSettings?.name ?? 'HLR Collaboration Server',
       version: this.version,
       tls: !this.insecureHttp,
@@ -814,10 +816,10 @@ export class CollabServer {
         const query: Record<string, string> = {};
         const format = url.searchParams.get('format');
         const objectType = url.searchParams.get('objectType');
-        const functionId = url.searchParams.get('functionId');
+        const requirementSetId = url.searchParams.get('requirementSetId');
         if (format !== null) query.format = format;
         if (objectType !== null) query.objectType = objectType;
-        if (functionId !== null) query.functionId = functionId;
+        if (requirementSetId !== null) query.requirementSetId = requirementSetId;
         const result = await this.roomService.exportRoom(user, roomId, query);
         sendSuccess(res, result, 200);
         return;

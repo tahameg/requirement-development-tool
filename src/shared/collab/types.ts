@@ -77,12 +77,12 @@ export const ROOM_ACTIONS = [
   'item:create',
   'item:edit',
   'item:delete',
-  'hierarchy:create-module',
-  'hierarchy:edit-module',
-  'hierarchy:create-function',
-  'hierarchy:edit-function',
-  'hierarchy:delete-module',
-  'hierarchy:delete-function',
+  'hierarchy:create-component',
+  'hierarchy:edit-component',
+  'hierarchy:create-requirement-set',
+  'hierarchy:edit-requirement-set',
+  'hierarchy:delete-component',
+  'hierarchy:delete-requirement-set',
   'project:edit-settings',
   'revision:save',
   'revision:history-diff',
@@ -129,8 +129,12 @@ export interface ServerSettings {
   updatedAt: string;
 }
 
+/** Bumped on breaking wire changes. 2: component / requirement-set terminology. */
+export const COLLAB_PROTOCOL_VERSION = 2;
+
 export interface ServerPublicInfo {
   serverId: string;
+  protocolVersion?: number;
   name: string;
   version: string;
   tls: boolean;
@@ -278,7 +282,7 @@ export interface RevisionDiffEntityChange {
 export interface RevisionDiffItemChange {
   id: string;
   objectType: ObjectType;
-  functionId: string;
+  requirementSetId: string;
   changedColumns?: string[];
 }
 
@@ -286,12 +290,12 @@ export interface RevisionDiff {
   fromRevisionId: string;
   toTarget: string;
   configChanged: boolean;
-  modules: {
+  components: {
     added: RevisionDiffEntityChange[];
     modified: RevisionDiffEntityChange[];
     deleted: RevisionDiffEntityChange[];
   };
-  functions: {
+  requirementSets: {
     added: RevisionDiffEntityChange[];
     modified: RevisionDiffEntityChange[];
     deleted: RevisionDiffEntityChange[];
@@ -339,7 +343,7 @@ export const COLLAB_OP_KINDS = [
   'item.add',
   'item.edit',
   'item.delete',
-  'function.description',
+  'requirementSet.description',
   'config.update',
   'room.restore',
 ] as const;
@@ -349,26 +353,26 @@ export type HierarchyOpPayload = HierarchyCommand;
 
 export interface ItemAddOpPayload {
   objectType: ObjectType;
-  functionId: string;
+  requirementSetId: string;
   values: Record<string, string | number | boolean | null>;
 }
 
 export interface ItemEditOpPayload {
   objectType: ObjectType;
-  functionId: string;
+  requirementSetId: string;
   itemId: string;
   values: Record<string, string | number | boolean | null>;
 }
 
 export interface ItemDeleteOpPayload {
   objectType: ObjectType;
-  functionId: string;
+  requirementSetId: string;
   itemId: string;
 }
 
-export interface FunctionDescriptionOpPayload {
+export interface RequirementSetDescriptionOpPayload {
   objectType: ObjectType;
-  functionId: string;
+  requirementSetId: string;
   description: string;
 }
 
@@ -383,7 +387,7 @@ export type CollabOp =
   | { opId: string; kind: 'item.add'; payload: ItemAddOpPayload }
   | { opId: string; kind: 'item.edit'; payload: ItemEditOpPayload }
   | { opId: string; kind: 'item.delete'; payload: ItemDeleteOpPayload }
-  | { opId: string; kind: 'function.description'; payload: FunctionDescriptionOpPayload }
+  | { opId: string; kind: 'requirementSet.description'; payload: RequirementSetDescriptionOpPayload }
   | { opId: string; kind: 'config.update'; payload: ConfigUpdateOpPayload }
   | { opId: string; kind: 'room.restore'; payload: RoomRestoreOpPayload };
 
@@ -399,6 +403,8 @@ export type OpRejectCode = (typeof OP_REJECT_CODES)[number];
 
 export interface LockHolder {
   userId: string;
+  /** Opaque per-session id; the same account in two windows holds locks separately. */
+  sessionKey: string;
   name: string;
   color: string;
 }
@@ -420,10 +426,19 @@ export interface PresenceFocusState {
   columnId: string;
 }
 
+/** A node someone is naming in the create dialog; peers render it as a ghost in the tree. */
+export interface PresenceCreatingState {
+  objectType: ObjectType;
+  kind: 'component' | 'requirementSet';
+  parentId: string | null;
+  name: string;
+}
+
 export interface PresenceState {
   view: PresenceViewState | null;
   focus: PresenceFocusState | null;
-  drafting: string | null; // functionId | null
+  drafting: string | null; // requirementSetId | null
+  creating?: PresenceCreatingState | null;
 }
 
 export interface PresenceBroadcastEntry {
@@ -443,8 +458,8 @@ export type AwarenessUserState = {
   displayName: string;
   role: RoomRole;
   color: string;
-  view: { objectType: ObjectType; kind: 'root' | 'module' | 'function'; id: string | null } | null;
-  focus: { objectType: ObjectType; functionId: string; itemId: string; columnId: string; cursor?: { anchor: number; head: number } | null } | null;
+  view: { objectType: ObjectType; kind: 'root' | 'component' | 'requirementSet'; id: string | null } | null;
+  focus: { objectType: ObjectType; requirementSetId: string; itemId: string; columnId: string; cursor?: { anchor: number; head: number } | null } | null;
   updatedAt: number;
 };
 
@@ -480,6 +495,7 @@ export type WsClientMessage =
       view: PresenceViewState | null;
       focus: PresenceFocusState | null;
       drafting: string | null;
+      creating?: PresenceCreatingState | null;
     }
   | {
       type: 'ping';
@@ -493,6 +509,8 @@ export type WsServerMessage =
       type: 'room-welcome';
       roomId: string;
       role: RoomRole;
+      connectionId: string;
+      sessionKey: string;
       seq: number;
       workspace: Workspace;
       locks: Record<string, LockHolder>;

@@ -4,7 +4,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { AppConfig, appConfigPath } from '../../src/main/config/appConfig.js';
 import { updateProjectConfig } from '../../src/main/config/projectConfig.js';
-import { createWorkspace, addModule, addFunction } from '../../src/main/services/workspaceFactory.js';
+import { createWorkspace, addComponent, addRequirementSet } from '../../src/main/services/workspaceFactory.js';
 import { addItem } from '../../src/main/services/idGenerator.js';
 
 describe('application INI configuration', () => {
@@ -40,11 +40,11 @@ describe('application INI configuration', () => {
   });
 });
 it('project configuration updates preserve item IDs and reject incompatible columns', () => {
-  let workspace = addModule(createWorkspace('Test', 'GS'), 'REQUIREMENT', 'Module', 'MOD');
-  workspace = addFunction(workspace, 'REQUIREMENT', workspace.domains.REQUIREMENT.modules[0]!.id, 'Function', 'FN');
-  workspace = addItem(workspace, 'REQUIREMENT', workspace.domains.REQUIREMENT.functions[0]!.functionId, { col_desc: 'Requirement' });
+  let workspace = addComponent(createWorkspace('Test', 'GS'), 'REQUIREMENT', 'Module', 'MOD');
+  workspace = addRequirementSet(workspace, 'REQUIREMENT', workspace.domains.REQUIREMENT.components[0]!.id, 'Function', 'FN');
+  workspace = addItem(workspace, 'REQUIREMENT', workspace.domains.REQUIREMENT.requirementSets[0]!.requirementSetId, { col_desc: 'Requirement' });
   const updated = updateProjectConfig(workspace, { ...workspace.config, projectPrefix: 'NEW', idCasing: 'LOWER' });
-  expect(updated.domains.REQUIREMENT.functions[0]!.items).toEqual(workspace.domains.REQUIREMENT.functions[0]!.items);
+  expect(updated.domains.REQUIREMENT.requirementSets[0]!.items).toEqual(workspace.domains.REQUIREMENT.requirementSets[0]!.items);
   expect(workspace.config.projectPrefix).toBe('GS');
   expect(() => updateProjectConfig(workspace, { ...workspace.config, projectId: 'other' })).toThrow('identity');
   const invalid = structuredClone(workspace.config); invalid.objectTypes.REQUIREMENT.columns = [];

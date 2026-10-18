@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { WebSocket } from 'ws';
-import { addFunction, addModule, createWorkspace } from '../../src/main/services/workspaceFactory.js';
+import { addRequirementSet, addComponent, createWorkspace } from '../../src/main/services/workspaceFactory.js';
 import {
   CollabServer,
   formatServerHelpText,
@@ -173,11 +173,11 @@ describe('T05 / R01 / R02: RoomRuntime, CollabServer, REST API, and WebSocket ha
 
   function createSeededTestWorkspace() {
     let ws = createWorkspace('Flight Control System', 'FCS');
-    ws = addModule(ws, 'REQUIREMENT', 'Navigation', 'NAV', null);
-    ws.domains.REQUIREMENT.modules[0]!.description = 'Navigation module scope';
-    const navModuleId = ws.domains.REQUIREMENT.modules[0]!.id;
-    ws = addFunction(ws, 'REQUIREMENT', navModuleId, 'Guidance', 'GDC');
-    ws.domains.REQUIREMENT.functions[0]!.description = 'Initial guidance description';
+    ws = addComponent(ws, 'REQUIREMENT', 'Navigation', 'NAV', null);
+    ws.domains.REQUIREMENT.components[0]!.description = 'Navigation module scope';
+    const navComponentId = ws.domains.REQUIREMENT.components[0]!.id;
+    ws = addRequirementSet(ws, 'REQUIREMENT', navComponentId, 'Guidance', 'GDC');
+    ws.domains.REQUIREMENT.requirementSets[0]!.description = 'Initial guidance description';
     return ws;
   }
 
@@ -354,13 +354,13 @@ describe('T05 / R01 / R02: RoomRuntime, CollabServer, REST API, and WebSocket ha
     const info = await server.start();
     const owner = await server.authService.claimSetupToken({ setupToken: info.setupToken!, username: 'owner', displayName: 'Owner', password: 'password123' });
     const workspace = createSeededTestWorkspace();
-    const functionId = workspace.domains.REQUIREMENT.functions[0]!.functionId;
+    const requirementSetId = workspace.domains.REQUIREMENT.requirementSets[0]!.requirementSetId;
     const room = await server.roomService.createRoom(owner.user, { name: 'Concurrent', visibility: 'listed', workspace });
     const clients = await Promise.all(Array.from({ length: 5 }, () => connectTestWsClient(server.getWsBaseUrl(), room.id, owner.token)));
     try {
       await Promise.all(clients.map(c => c.waitForMessage('room-welcome')));
       const ops = Array.from({ length: 50 }, (_, i) => ({ opId: randomUUID(), kind: 'item.add' as const,
-        payload: { objectType: 'REQUIREMENT' as const, functionId, values: { col_desc: `Requirement ${i}` } } }));
+        payload: { objectType: 'REQUIREMENT' as const, requirementSetId, values: { col_desc: `Requirement ${i}` } } }));
       const acknowledgments = ops.map((op, i) => {
         const client = clients[i % clients.length]!;
         client.send({ type: 'op', op });
@@ -370,7 +370,7 @@ describe('T05 / R01 / R02: RoomRuntime, CollabServer, REST API, and WebSocket ha
       expect(acks.map(a => a.seq).sort((a, b) => a - b)).toEqual(Array.from({ length: 50 }, (_, i) => i + 1));
       const runtime = server.runtimeManager.getLoadedRuntime(room.id)!;
       const live = runtime.getWorkspace();
-      expect(new Set(live.domains.REQUIREMENT.functions[0]!.items.map(i => i.id)).size).toBe(50);
+      expect(new Set(live.domains.REQUIREMENT.requirementSets[0]!.items.map(i => i.id)).size).toBe(50);
       for (const client of clients) {
         let mirror = workspace;
         for (let seq = 1; seq <= 50; seq++) {
@@ -415,13 +415,13 @@ describe('T05 / R01 / R02: RoomRuntime, CollabServer, REST API, and WebSocket ha
     const info = await server.start();
     const owner = await server.authService.claimSetupToken({ setupToken: info.setupToken!, username: 'owner', displayName: 'Owner', password: 'password123' });
     const workspace = createSeededTestWorkspace();
-    const functionId = workspace.domains.REQUIREMENT.functions[0]!.functionId;
+    const requirementSetId = workspace.domains.REQUIREMENT.requirementSets[0]!.requirementSetId;
     const room = await server.roomService.createRoom(owner.user, { name: 'Rejects', visibility: 'listed', workspace });
     const client = await connectTestWsClient(server.getWsBaseUrl(), room.id, owner.token);
     try {
       await client.waitForMessage('room-welcome');
       const runtime = server.runtimeManager.getLoadedRuntime(room.id)!;
-      const op = { opId: randomUUID(), kind: 'item.add' as const, payload: { objectType: 'REQUIREMENT' as const, functionId, values: { col_desc: 'Valid' } } };
+      const op = { opId: randomUUID(), kind: 'item.add' as const, payload: { objectType: 'REQUIREMENT' as const, requirementSetId, values: { col_desc: 'Valid' } } };
       await fixture.store.memberships.updateRole(room.id, owner.user.id, 'VIEWER');
       client.send({ type: 'op', op });
       expect((await client.waitForMessage('op-rejected')).code).toBe('READ_ONLY');
@@ -437,8 +437,8 @@ describe('T05 / R01 / R02: RoomRuntime, CollabServer, REST API, and WebSocket ha
       await fixture.pool.query('ALTER TABLE room_ops DROP CONSTRAINT test_reject_ops');
       client.send({ type: 'op', op });
       expect((await client.waitForMessage('op-ack')).seq).toBe(1);
-      const itemId = runtime.getWorkspace().domains.REQUIREMENT.functions[0]!.items[0]!.id;
-      const edit = { opId: randomUUID(), kind: 'item.edit' as const, payload: { objectType: 'REQUIREMENT' as const, functionId, itemId, values: { col_desc: 'Updated' } } };
+      const itemId = runtime.getWorkspace().domains.REQUIREMENT.requirementSets[0]!.items[0]!.id;
+      const edit = { opId: randomUUID(), kind: 'item.edit' as const, payload: { objectType: 'REQUIREMENT' as const, requirementSetId, itemId, values: { col_desc: 'Updated' } } };
       client.send({ type: 'lock-release', key: `item:${itemId}` });
       client.send({ type: 'op', op: edit });
       expect((await client.waitForMessage('op-rejected')).code).toBe('LOCKED');
@@ -446,7 +446,7 @@ describe('T05 / R01 / R02: RoomRuntime, CollabServer, REST API, and WebSocket ha
       await client.waitForMessage('lock-granted');
       client.send({ type: 'op', op: edit });
       expect((await client.waitForMessage('op-ack', m => m.opId === edit.opId)).seq).toBe(2);
-      expect(runtime.getWorkspace().domains.REQUIREMENT.functions[0]!.items[0]!.values.col_desc).toBe('Updated');
+      expect(runtime.getWorkspace().domains.REQUIREMENT.requirementSets[0]!.items[0]!.values.col_desc).toBe('Updated');
     } finally { await client.close(); }
   });
 

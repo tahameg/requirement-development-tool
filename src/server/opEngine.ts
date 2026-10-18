@@ -20,14 +20,14 @@ export function applyWorkspaceOp(input: Workspace, op: CollabOp, result: OpResul
   if (op.kind === 'hierarchy') {
     const workspace = changeHierarchy(input, op.payload);
     const domain = workspace.domains[op.payload.objectType];
-    if (op.payload.action === 'addModule') {
-      const node = domain.modules.at(-1)!;
+    if (op.payload.action === 'addComponent') {
+      const node = domain.components.at(-1)!;
       node.id = result.createdId ?? node.id;
       result = { ...result, createdId: node.id };
-    } else if (op.payload.action === 'addFunction') {
-      const node = domain.functions.at(-1)!;
-      node.functionId = result.createdId ?? node.functionId;
-      result = { ...result, createdId: node.functionId };
+    } else if (op.payload.action === 'addRequirementSet') {
+      const node = domain.requirementSets.at(-1)!;
+      node.requirementSetId = result.createdId ?? node.requirementSetId;
+      result = { ...result, createdId: node.requirementSetId };
     }
     return { workspace, result };
   }
@@ -35,21 +35,21 @@ export function applyWorkspaceOp(input: Workspace, op: CollabOp, result: OpResul
   const domain = input.domains[p.objectType];
   const config = input.config.objectTypes[p.objectType];
   if (!config.enabled) throw new OpError('VALIDATION', 'Object type is disabled.');
-  const fn = domain.functions.find(f => f.functionId === p.functionId);
-  if (!fn) throw new OpError('NOT_FOUND', 'Function no longer exists.');
+  const fn = domain.requirementSets.find(f => f.requirementSetId === p.requirementSetId);
+  if (!fn) throw new OpError('NOT_FOUND', 'Requirement set no longer exists.');
   if (op.kind === 'item.add') {
-    const workspace = addItem(input, p.objectType, p.functionId, op.payload.values);
-    const item = workspace.domains[p.objectType].functions.find(f => f.functionId === p.functionId)!.items.at(-1)!;
+    const workspace = addItem(input, p.objectType, p.requirementSetId, op.payload.values);
+    const item = workspace.domains[p.objectType].requirementSets.find(f => f.requirementSetId === p.requirementSetId)!.items.at(-1)!;
     if (result.createdId && result.createdId !== item.id) throw new Error('Operation replay allocated a different item ID');
     item.created_at = result.timestamp;
     return { workspace, result: { ...result, createdId: item.id } };
   }
   if (op.kind === 'item.delete') {
-    return { workspace: validateWorkspace(deleteItem(input, p.objectType, p.functionId, op.payload.itemId)), result };
+    return { workspace: validateWorkspace(deleteItem(input, p.objectType, p.requirementSetId, op.payload.itemId)), result };
   }
   // Copy only the touched path. Live typing never clones or validates the entire workspace.
   let nextFn = { ...fn };
-  if (op.kind === 'function.description') nextFn.description = op.payload.description;
+  if (op.kind === 'requirementSet.description') nextFn.description = op.payload.description;
   else {
     const index = fn.items.findIndex(i => i.id === op.payload.itemId);
     if (index < 0) throw new OpError('NOT_FOUND', 'Item no longer exists.');
@@ -61,12 +61,12 @@ export function applyWorkspaceOp(input: Workspace, op: CollabOp, result: OpResul
       validateValue(column, value);
       if (column.type === 'reference' && value !== null && value !== '') {
         const found = (['DATA_DICTIONARY', 'ENTITY', 'ACTION'] as const).some(type =>
-          (!column.referenceTypes || column.referenceTypes.includes(type)) && input.domains[type].functions.some(f => f.items.some(i => i.id === value)));
+          (!column.referenceTypes || column.referenceTypes.includes(type)) && input.domains[type].requirementSets.some(f => f.items.some(i => i.id === value)));
         if (!found) throw new OpError('VALIDATION', `Unresolved reference: ${value}`);
       }
     }
     nextFn.items = fn.items.slice();
     nextFn.items[index] = { ...item, values, updated_at: result.timestamp };
   }
-  return { workspace: { ...input, domains: { ...input.domains, [p.objectType]: { ...domain, functions: domain.functions.map(f => f === fn ? nextFn : f) } } }, result };
+  return { workspace: { ...input, domains: { ...input.domains, [p.objectType]: { ...domain, requirementSets: domain.requirementSets.map(f => f === fn ? nextFn : f) } } }, result };
 }

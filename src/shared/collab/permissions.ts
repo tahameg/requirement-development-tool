@@ -179,14 +179,14 @@ export function canRoomAction(
     case 'item:create':
     case 'item:edit':
     case 'item:delete':
-    case 'hierarchy:create-module':
-    case 'hierarchy:edit-module':
-    case 'hierarchy:create-function':
-    case 'hierarchy:edit-function':
+    case 'hierarchy:create-component':
+    case 'hierarchy:edit-component':
+    case 'hierarchy:create-requirement-set':
+    case 'hierarchy:edit-requirement-set':
       return hasMinimumRoomRole(actorRoomRole, 'EDITOR');
 
-    case 'hierarchy:delete-module':
-    case 'hierarchy:delete-function':
+    case 'hierarchy:delete-component':
+    case 'hierarchy:delete-requirement-set':
     case 'project:edit-settings':
     case 'revision:save':
     case 'revision:history-diff':
@@ -312,12 +312,12 @@ export function authorizeOp(
     case 'hierarchy': {
       const cmd = op.payload;
       switch (cmd.action) {
-        case 'addModule':
-        case 'addFunction':
+        case 'addComponent':
+        case 'addRequirementSet':
           return { ok: true };
 
-        case 'editModule':
-        case 'editFunction': {
+        case 'editComponent':
+        case 'editRequirementSet': {
           const key = `node:${cmd.id}`;
           if (isHeldByOther(key)) {
             const holder = getHolder(key)!;
@@ -331,13 +331,13 @@ export function authorizeOp(
           return { ok: true };
         }
 
-        case 'deleteModule': {
+        case 'deleteComponent': {
           if (!hasMinimumRoomRole(role, 'ROOM_ADMIN')) {
             return {
               ok: false,
               code: 'FORBIDDEN',
               targetId: cmd.id,
-              message: `Only room admins and owners can delete module '${cmd.id}'.`,
+              message: `Only room admins and owners can delete component '${cmd.id}'.`,
             };
           }
           const key = `node:${cmd.id}`;
@@ -354,45 +354,45 @@ export function authorizeOp(
           // Subtree lock check: deleting requires no lock held by others anywhere in the subtree
           const domain = workspace.domains[cmd.objectType];
           if (domain) {
-            const allModuleIds = new Set<string>([cmd.id]);
+            const allComponentIds = new Set<string>([cmd.id]);
             let expanded = true;
             while (expanded) {
               expanded = false;
-              for (const m of domain.modules) {
-                if (m.parentId && allModuleIds.has(m.parentId) && !allModuleIds.has(m.id)) {
-                  allModuleIds.add(m.id);
+              for (const m of domain.components) {
+                if (m.parentId && allComponentIds.has(m.parentId) && !allComponentIds.has(m.id)) {
+                  allComponentIds.add(m.id);
                   expanded = true;
                 }
               }
             }
 
-            for (const modId of allModuleIds) {
+            for (const modId of allComponentIds) {
               if (modId !== cmd.id && isHeldByOther(`node:${modId}`)) {
                 return {
                   ok: false,
                   code: 'LOCKED',
                   targetId: modId,
-                  message: `Cannot delete module '${cmd.id}' while locks are held in its subtree.`,
+                  message: `Cannot delete component '${cmd.id}' while locks are held in its subtree.`,
                 };
               }
             }
 
-            for (const fn of domain.functions) {
-              if (allModuleIds.has(fn.parentModuleId)) {
-                if (isHeldByOther(`node:${fn.functionId}`)) {
+            for (const fn of domain.requirementSets) {
+              if (allComponentIds.has(fn.parentComponentId)) {
+                if (isHeldByOther(`node:${fn.requirementSetId}`)) {
                   return {
                     ok: false,
                     code: 'LOCKED',
-                    targetId: fn.functionId,
-                    message: `Cannot delete module '${cmd.id}' while locks are held in its subtree.`,
+                    targetId: fn.requirementSetId,
+                    message: `Cannot delete component '${cmd.id}' while locks are held in its subtree.`,
                   };
                 }
-                if (isHeldByOther(`fn-desc:${fn.functionId}`)) {
+                if (isHeldByOther(`rs-desc:${fn.requirementSetId}`)) {
                   return {
                     ok: false,
                     code: 'LOCKED',
-                    targetId: fn.functionId,
-                    message: `Cannot delete module '${cmd.id}' while locks are held in its subtree.`,
+                    targetId: fn.requirementSetId,
+                    message: `Cannot delete component '${cmd.id}' while locks are held in its subtree.`,
                   };
                 }
                 for (const itm of fn.items) {
@@ -401,7 +401,7 @@ export function authorizeOp(
                       ok: false,
                       code: 'LOCKED',
                       targetId: itm.id,
-                      message: `Cannot delete module '${cmd.id}' while locks are held in its subtree.`,
+                      message: `Cannot delete component '${cmd.id}' while locks are held in its subtree.`,
                     };
                   }
                 }
@@ -411,13 +411,13 @@ export function authorizeOp(
           return { ok: true };
         }
 
-        case 'deleteFunction': {
+        case 'deleteRequirementSet': {
           if (!hasMinimumRoomRole(role, 'ROOM_ADMIN')) {
             return {
               ok: false,
               code: 'FORBIDDEN',
               targetId: cmd.id,
-              message: `Only room admins and owners can delete function '${cmd.id}'.`,
+              message: `Only room admins and owners can delete requirement set '${cmd.id}'.`,
             };
           }
           const key = `node:${cmd.id}`;
@@ -431,17 +431,17 @@ export function authorizeOp(
             };
           }
 
-          if (isHeldByOther(`fn-desc:${cmd.id}`)) {
+          if (isHeldByOther(`rs-desc:${cmd.id}`)) {
             return {
               ok: false,
               code: 'LOCKED',
               targetId: cmd.id,
-              message: `Cannot delete function '${cmd.id}' while locks are held in its subtree.`,
+              message: `Cannot delete requirement set '${cmd.id}' while locks are held in its subtree.`,
             };
           }
 
           const domain = workspace.domains[cmd.objectType];
-          const fn = domain?.functions.find(f => f.functionId === cmd.id);
+          const fn = domain?.requirementSets.find(f => f.requirementSetId === cmd.id);
           if (fn) {
             for (const itm of fn.items) {
               if (isHeldByOther(`item:${itm.id}`)) {
@@ -449,7 +449,7 @@ export function authorizeOp(
                   ok: false,
                   code: 'LOCKED',
                   targetId: itm.id,
-                  message: `Cannot delete function '${cmd.id}' while locks are held in its subtree.`,
+                  message: `Cannot delete requirement set '${cmd.id}' while locks are held in its subtree.`,
                 };
               }
             }
@@ -494,14 +494,14 @@ export function authorizeOp(
       return { ok: true };
     }
 
-    case 'function.description': {
-      // Caller must hold fn-desc:<functionId>
-      const key = `fn-desc:${op.payload.functionId}`;
+    case 'requirementSet.description': {
+      // Caller must hold rs-desc:<requirementSetId>
+      const key = `rs-desc:${op.payload.requirementSetId}`;
       if (!isHeldByCaller(key)) {
         return {
           ok: false,
           code: 'LOCKED',
-          targetId: op.payload.functionId,
+          targetId: op.payload.requirementSetId,
           message: `Operation requires lock '${key}'.`,
         };
       }

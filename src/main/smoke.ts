@@ -15,11 +15,11 @@ export async function runPackagedSmoke(): Promise<void> {
     session.defaultSession.enableNetworkEmulation({ offline: true });
     const workspace = path.join(root, 'Offline.hlr');
     await service.create(workspace, 'Offline verification', 'TEST');
-    await service.changeHierarchy({ action: 'addModule', objectType: 'REQUIREMENT', parentId: null, name: 'Module', prefix: 'MOD', description: '' });
-    const parentId = service.state().current!.workspace.domains.REQUIREMENT.modules[0]!.id;
-    await service.changeHierarchy({ action: 'addFunction', objectType: 'REQUIREMENT', parentId, name: 'Function', prefix: 'FN', description: '' });
-    const functionId = service.state().current!.workspace.domains.REQUIREMENT.functions[0]!.functionId;
-    await service.editFunction({ objectType: 'REQUIREMENT', functionId, changes: [{ action: 'add', values: { col_desc: 'The application shall work offline.' } }] });
+    await service.changeHierarchy({ action: 'addComponent', objectType: 'REQUIREMENT', parentId: null, name: 'Module', prefix: 'MOD', description: '' });
+    const parentId = service.state().current!.workspace.domains.REQUIREMENT.components[0]!.id;
+    await service.changeHierarchy({ action: 'addRequirementSet', objectType: 'REQUIREMENT', parentId, name: 'Function', prefix: 'FN', description: '' });
+    const requirementSetId = service.state().current!.workspace.domains.REQUIREMENT.requirementSets[0]!.requirementSetId;
+    await service.authorRequirementSet({ objectType: 'REQUIREMENT', requirementSetId, changes: [{ action: 'add', values: { col_desc: 'The application shall work offline.' } }] });
     assert.equal(service.state().current!.index.status, 'ready'); assert.equal(service.search('offline').length, 1);
     assert.match(service.export({ format: 'csv' }), /work offline/);
     service.close(); writeFileSync(path.join(workspace, '.hlr/cache.sqlite'), 'broken cache'); await service.open(workspace);

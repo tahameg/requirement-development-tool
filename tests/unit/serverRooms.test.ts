@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { addItem } from '../../src/main/services/idGenerator.js';
-import { addFunction, addModule, createWorkspace } from '../../src/main/services/workspaceFactory.js';
+import { addRequirementSet, addComponent, createWorkspace } from '../../src/main/services/workspaceFactory.js';
 import { AuthService } from '../../src/server/auth.js';
 import { RoomService, type RoomLifecycleEvent } from '../../src/server/rooms.js';
 import {
@@ -137,10 +137,10 @@ describe('T04 / R02: RoomService (rooms, memberships, invites, join requests, ki
       const { rooms, alice } = await createFixture();
 
       let imported = createWorkspace('Imported Radar System', 'RDR');
-      imported = addModule(imported, 'REQUIREMENT', 'Signal Processing', 'SIG');
-      const modId = imported.domains.REQUIREMENT.modules[0]!.id;
-      imported = addFunction(imported, 'REQUIREMENT', modId, 'Target Tracking', 'TRK');
-      const fnId = imported.domains.REQUIREMENT.functions[0]!.functionId;
+      imported = addComponent(imported, 'REQUIREMENT', 'Signal Processing', 'SIG');
+      const modId = imported.domains.REQUIREMENT.components[0]!.id;
+      imported = addRequirementSet(imported, 'REQUIREMENT', modId, 'Target Tracking', 'TRK');
+      const fnId = imported.domains.REQUIREMENT.requirementSets[0]!.requirementSetId;
       imported = addItem(imported, 'REQUIREMENT', fnId, {
         col_desc: 'The radar shall track up to 64 targets simultaneously.',
         col_status: 'Approved',
@@ -156,12 +156,12 @@ describe('T04 / R02: RoomService (rooms, memberships, invites, join requests, ki
       expect(room.projectName).toBe('Imported Radar System');
 
       const loaded = await rooms.loadRoomWorkspace(room.id);
-      expect(loaded.domains.REQUIREMENT.functions[0]?.items).toHaveLength(1);
-      expect(loaded.domains.REQUIREMENT.functions[0]?.items[0]?.id).toBe('REQ-RDR-SIG-TRK-001');
+      expect(loaded.domains.REQUIREMENT.requirementSets[0]?.items).toHaveLength(1);
+      expect(loaded.domains.REQUIREMENT.requirementSets[0]?.items[0]?.id).toBe('REQ-RDR-SIG-TRK-001');
 
       // Invalid workspace (broken parent module reference) -> 400 BAD_REQUEST
       const brokenWorkspace = structuredClone(imported);
-      brokenWorkspace.domains.REQUIREMENT.functions[0]!.parentModuleId = 'mod_nonexistent';
+      brokenWorkspace.domains.REQUIREMENT.requirementSets[0]!.parentComponentId = 'mod_nonexistent';
       await expect(
         rooms.createRoom(alice, {
           name: 'Broken Room',

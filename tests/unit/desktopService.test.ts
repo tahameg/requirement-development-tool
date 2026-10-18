@@ -23,12 +23,12 @@ it('creates, opens and saves workspaces; persists settings; protects existing de
     expect((await loadWorkspace(project)).config.projectName).toBe('Renamed');
     service.saveSettings({ theme: 'high-contrast', language: 'en', auto_save_interval_sec: 60 });
     expect(service.config.get().general.theme).toBe('high-contrast');
-    await service.changeHierarchy({ action: 'addModule', objectType: 'REQUIREMENT', parentId: null, name: 'Persisted module', prefix: 'M', description: 'Scope' });
-    const moduleId = service.state().current!.workspace.domains.REQUIREMENT.modules[0]!.id;
-    await service.changeHierarchy({ action: 'addFunction', objectType: 'REQUIREMENT', parentId: moduleId, name: 'Persisted function', prefix: 'FN', description: 'Function scope' });
-    expect((await loadWorkspace(project)).domains.REQUIREMENT.functions[0]!.modulePath).toEqual(['Persisted module']);
-    await expect(service.changeHierarchy({ action: 'addFunction', objectType: 'REQUIREMENT', parentId: moduleId, name: 'Persisted function', prefix: 'OTHER', description: '' })).rejects.toThrow('unique');
-    expect(service.state().current!.workspace.domains.REQUIREMENT.functions).toHaveLength(1);
+    await service.changeHierarchy({ action: 'addComponent', objectType: 'REQUIREMENT', parentId: null, name: 'Persisted module', prefix: 'M', description: 'Scope' });
+    const componentId = service.state().current!.workspace.domains.REQUIREMENT.components[0]!.id;
+    await service.changeHierarchy({ action: 'addRequirementSet', objectType: 'REQUIREMENT', parentId: componentId, name: 'Persisted function', prefix: 'FN', description: 'Function scope' });
+    expect((await loadWorkspace(project)).domains.REQUIREMENT.requirementSets[0]!.componentPath).toEqual(['Persisted module']);
+    await expect(service.changeHierarchy({ action: 'addRequirementSet', objectType: 'REQUIREMENT', parentId: componentId, name: 'Persisted function', prefix: 'OTHER', description: '' })).rejects.toThrow('unique');
+    expect(service.state().current!.workspace.domains.REQUIREMENT.requirementSets).toHaveLength(1);
     await service.save(); service.close();
     writeFileSync(path.join(project, '.hlr/cache.sqlite'), 'broken');
     await service.open(project);
