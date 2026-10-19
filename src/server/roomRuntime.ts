@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { restoreWorkspace, revisionMetadata } from './revisions.js';
+import { canonical, restoreWorkspace, revisionMetadata } from './revisions.js';
 import { LockManager, PresenceThrottle } from './locks.js';
 import { recoverRoom } from './recoverRoom.js';
 import { applyWorkspaceOp, OpError, type OpResult } from './opEngine.js';
@@ -155,10 +155,18 @@ export class RoomRuntime {
     return this.locks.state();
   }
   private session(conn: RoomClientConnection) { return conn.sessionId ?? conn.connectionId; }
+  private readonly sessionKeys = new Map<string, string>();
+  /** Clients compare lock holders by this opaque key; the internal session id is never sent. */
+  private sessionKey(conn: RoomClientConnection) {
+    const session = this.session(conn);
+    let key = this.sessionKeys.get(session);
+    if (!key) { key = randomUUID(); this.sessionKeys.set(session, key); }
+    return key;
+  }
   private validLockKey(key: string) {
     if (key === 'config') return true;
-    return Object.values(this.workspace.domains).some(domain => domain.modules.some(m => key === `node:${m.id}`) ||
-      domain.functions.some(f => key === `node:${f.functionId}` || key === `fn-desc:${f.functionId}` || f.items.some(i => key === `item:${i.id}`)));
+    return Object.values(this.workspace.domains).some(domain => domain.components.some(m => key === `node:${m.id}`) ||
+      domain.requirementSets.some(f => key === `node:${f.requirementSetId}` || key === `rs-desc:${f.requirementSetId}` || f.items.some(i => key === `item:${i.id}`)));
   }
 
   addClient(connection: RoomClientConnection): void {
@@ -174,6 +182,8 @@ export class RoomRuntime {
       type: 'room-welcome',
       roomId: this.roomId,
       role: connection.role,
+      connectionId: connection.connectionId,
+      sessionKey: this.sessionKey(connection),
       seq: this.seq,
       workspace: this.getWorkspace(),
       locks: this.getLockState(),
@@ -232,7 +242,7 @@ export class RoomRuntime {
     const conn = this.connections.get(connectionId);
     if (!conn) return;
 
-    if (conn.role === 'VIEWER') state = { ...state, focus: null, drafting: null };
+    if (conn.role === 'VIEWER') state = { ...state, focus: null, drafting: null, creating: null };
     conn.presence = state;
     if (!this.presenceThrottle.accept(connectionId)) {
       if (!this.presenceTimers.has(connectionId)) this.presenceTimers.set(connectionId, setTimeout(() => {
@@ -262,7 +272,7 @@ export class RoomRuntime {
 
     if (conn.role === 'VIEWER' || key === 'config' && conn.role === 'EDITOR') throw new CollabServiceError('FORBIDDEN', 'You cannot acquire this lock');
     if (!this.validLockKey(key)) throw new CollabServiceError('NOT_FOUND', 'Lock target no longer exists');
-    return this.locks.acquire(key, this.session(conn), { userId: conn.user.id, name: conn.user.displayName, color: conn.color });
+    return this.locks.acquire(key, this.session(conn), { userId: conn.user.id, sessionKey: this.sessionKey(conn), name: conn.user.displayName, color: conn.color });
   }
   async releaseLock(connectionId: string, key: string): Promise<boolean> {
     const conn = this.connections.get(connectionId);
@@ -356,7 +366,10 @@ export class RoomRuntime {
           return { seq: previous.seq, result: previous.result };
         }
         if (room.head_seq !== this.seq) throw new OpError('CONFLICT', 'Room changed in another server process; reconnect after restarting this server');
-        const requiredKey = parsed.kind === 'item.edit' ? `item:${parsed.payload.itemId}` : parsed.kind === 'function.description' ? `fn-desc:${parsed.payload.functionId}` : parsed.kind === 'config.update' ? 'config' : null;
+        // Project settings can add or remove columns under everyone's feet, so the room pauses while they change.
+        const settings = parsed.kind === 'config.update' || parsed.kind === 'room.restore' ? undefined : this.locks.get('config');
+        if (settings && settings.sessionId !== this.session(conn)) throw new OpError('LOCKED', `${settings.holder.name} is changing project settings. Your draft is kept and can be saved when they finish.`);
+        const requiredKey = parsed.kind === 'item.edit' ? `item:${parsed.payload.itemId}` : parsed.kind === 'requirementSet.description' ? `rs-desc:${parsed.payload.requirementSetId}` : parsed.kind === 'config.update' ? 'config' : null;
         if (requiredKey && !this.locks.owns(requiredKey, this.session(conn))) throw new OpError('LOCKED', 'This session does not hold the edit lock');
         const permission = authorizeOp(member.role, parsed, this.locks.authorizationState(this.session(conn)), this.workspace, conn.user.id);
         if (!permission.ok) throw new OpError(permission.code, permission.message);
@@ -703,8 +716,3 @@ export class RoomRuntimeManager {
   }
 }
 
-function canonical(value: unknown): string {
-  if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']';
-  if (value && typeof value === 'object') return '{' + Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([k, v]) => JSON.stringify(k) + ':' + canonical(v)).join(',') + '}';
-  return JSON.stringify(value);
-}

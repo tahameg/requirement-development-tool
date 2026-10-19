@@ -3,6 +3,10 @@
 > **Multiuser update (2026-10-17):** This document defines the offline authoring domain. Collaboration follows `docs/collab/BRIEF.md`, `ARCHITECTURE-v2.md`, `PERMISSIONS.md` and `PROTOCOL.md`. The optional headless server uses PostgreSQL, ordered operations and session edit locks; the desktop preserves local JSON/SQLite offline mode. See `docs/collab/DEPLOYMENT.md` for offline server installation, TLS trust, revisions and backups. The user explicitly authorized completing all remaining collaboration tasks in this session, superseding the old one-task-per-session instruction.
 
 
+> **Terminology update (2026-10-18):** Modules are now **Components** (top level) and **Subcomponents** (nested); Functions are now **Requirement Sets**. The rename covers the UI, the code, the JSON workspace format (`components.json`, `requirement-sets/rs-*.json`, `requirementSetId`, `parentComponentId`, `componentPath`), the collaboration protocol (v2) and stored server data. Legacy workspaces, stored room operations and desktop drafts are upgraded on read by `src/shared/types/legacy.ts`. Legacy `fn_` IDs stay valid. The seed prompt below is quoted verbatim and keeps the old words; read "module" as component and "function" as requirement set.
+>
+> **UI direction (2026-10-18):** Brutalist and rigid: no border radius, 2px rules, hard offset shadows, an icon on every item, and actions grouped by intent (create / edit / danger kept apart). Collaboration must always show who is doing what: ghost nodes for things being created, colored rows and cell flags for locks, and a room-wide pause while project settings change.
+
 > **Context for AI Agents & Developers**  
 > This document is the single source of truth for the architecture, domain model, user experience, data persistence, and engineering roadmap of the **HLR Writing Tool**. Any autonomous or semi-autonomous AI agent continuing this project must read, align with, and adhere strictly to the conventions and guidelines established here.
 
@@ -307,32 +311,33 @@ To enable easy conversion by external tools, the project directory format is hum
 ```
 MyProject.hlr/
 ├── project.config.json              <-- Project settings & column definitions
+├── retired-ids.json                 <-- Project-wide tombstones (never reused)
 ├── .hlr/
 │   └── cache.sqlite                 <-- SQLite runtime index (reconstructible cache)
 ├── requirements/
-│   ├── modules.json                 <-- Module tree structure for Requirements
-│   └── functions/
-│       ├── fn-tsCreateParser.json   <-- Function metadata, description & requirements
-│       └── fn-tsParseAST.json
+│   ├── components.json              <-- Component tree (components + subcomponents)
+│   └── requirement-sets/
+│       ├── rs-rs_<uuid>.json        <-- Requirement set metadata, description & items
+│       └── rs-fn_<uuid>.json        <-- Legacy-ID set (created before the rename)
 ├── data-dictionary/
-│   ├── modules.json
-│   └── functions/
+│   ├── components.json
+│   └── requirement-sets/
 ├── entities/
-│   ├── modules.json
-│   └── functions/
+│   ├── components.json
+│   └── requirement-sets/
 └── actions/
-    ├── modules.json
-    └── functions/
+    ├── components.json
+    └── requirement-sets/
 ```
 
-### 6.2 Function & Requirement File Schema (`fn-*.json`)
+### 6.2 Requirement Set File Schema (`rs-*.json`)
 ```json
 {
-  "functionId": "fn_f48b11a9-b2de-4f11-9a7c-31a89c9d5e30",
+  "requirementSetId": "rs_f48b11a9-b2de-4f11-9a7c-31a89c9d5e30",
   "name": "tsCreateParser",
   "prefix": "TSCRTPRSR",
-  "modulePath": ["Compiler", "Parser"],
-  "parentModuleId": "mod_b819f0a2",
+  "componentPath": ["Compiler", "Parser"],
+  "parentComponentId": "cmp_b819f0a2",
   "description": "# tsCreateParser Specification\nInitializes the lexical and syntax parser with the supplied configuration.\n\n### Inputs\n- `config`: ParserConfiguration\n### Outputs\n- `parserInstance`: Handle",
   "watermarkCounter": 3,
   "items": [

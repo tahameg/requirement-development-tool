@@ -6,7 +6,7 @@ import { DraftStore } from '../../src/main/collab/draftStore.js';
 it('persists a single scoped draft across app restarts and prevents path traversal', () => {
   const root = mkdtempSync(path.join(os.tmpdir(), 'hlr-drafts-'));
   try {
-    const draft = { objectType: 'REQUIREMENT' as const, functionId: 'f', itemId: 'i', baseValues: { col_desc: 'old' }, values: { col_desc: 'unsent' } };
+    const draft = { objectType: 'REQUIREMENT' as const, requirementSetId: 'f', itemId: 'i', baseValues: { col_desc: 'old' }, values: { col_desc: 'unsent' } };
     new DraftStore(root).save('https://server:user-a', '../../room', draft);
     const next = new DraftStore(root); expect(next.load('https://server:user-a', '../../room')).toEqual(draft);
     expect(next.load('https://server:user-b', '../../room')).toBeNull();

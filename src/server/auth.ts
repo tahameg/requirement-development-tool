@@ -20,6 +20,7 @@ import type {
   UserDirectoryEntry,
   UserProfile,
 } from '../shared/collab/types.js';
+import { COLLAB_PROTOCOL_VERSION } from '../shared/collab/types.js';
 import { CollabServiceError } from './errors.js';
 import {
   mapAuditLogRow,
@@ -227,6 +228,7 @@ export class AuthService {
     const setupRequired = await this.isSetupRequired();
     return {
       serverId: settings.serverId,
+      protocolVersion: COLLAB_PROTOCOL_VERSION,
       name: settings.name,
       version: meta.version ?? '0.6.0',
       tls: meta.tls ?? true,

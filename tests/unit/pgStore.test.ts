@@ -402,7 +402,7 @@ describe('R02: PostgreSQL Server Store and Migrations', () => {
         opId,
         userId: user.id,
         kind: 'item.add',
-        payload: { objectType: 'REQUIREMENT', functionId: 'fn_1', values: { name: 'Req 1' } },
+        payload: { objectType: 'REQUIREMENT', requirementSetId: 'fn_1', values: { name: 'Req 1' } },
         result: { itemId: 'item_1' },
       });
       expect(op.seq).toBe(1);

@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { hierarchyCommandSchema } from '../hierarchy.js';
 import { objectTypeSchema, projectConfigSchema, workspaceSchema } from '../types/schema.js';
+import { migrateOp } from '../types/legacy.js';
 import {
   API_ERROR_CODES,
   COLLAB_OP_KINDS,
@@ -78,6 +79,7 @@ export const serverSettingsSchema = z
 export const serverPublicInfoSchema = z
   .object({
     serverId: nonEmptyString,
+    protocolVersion: z.number().int().positive().optional(),
     name: trimmedName,
     version: nonEmptyString,
     tls: z.boolean(),
@@ -252,7 +254,7 @@ export const revisionDiffItemChangeSchema = z
   .object({
     id: nonEmptyString,
     objectType: objectTypeSchema,
-    functionId: nonEmptyString,
+    requirementSetId: nonEmptyString,
     changedColumns: z.array(z.string()).optional(),
   })
   .strict();
@@ -262,14 +264,14 @@ export const revisionDiffSchema = z
     fromRevisionId: nonEmptyString,
     toTarget: nonEmptyString,
     configChanged: z.boolean(),
-    modules: z
+    components: z
       .object({
         added: z.array(revisionDiffEntityChangeSchema),
         modified: z.array(revisionDiffEntityChangeSchema),
         deleted: z.array(revisionDiffEntityChangeSchema),
       })
       .strict(),
-    functions: z
+    requirementSets: z
       .object({
         added: z.array(revisionDiffEntityChangeSchema),
         modified: z.array(revisionDiffEntityChangeSchema),
@@ -641,7 +643,7 @@ export const roomExportQuerySchema = z
   .object({
     format: z.enum(['json', 'csv', 'markdown']),
     objectType: objectTypeSchema.optional(),
-    functionId: nonEmptyString.optional(),
+    requirementSetId: nonEmptyString.optional(),
   })
   .strict();
 
@@ -700,7 +702,7 @@ export const hierarchyOpPayloadSchema = hierarchyCommandSchema;
 export const itemAddOpPayloadSchema = z
   .object({
     objectType: objectTypeSchema,
-    functionId: nonEmptyString,
+    requirementSetId: nonEmptyString,
     values: z.record(primitiveCellValueSchema),
   })
   .strict();
@@ -708,7 +710,7 @@ export const itemAddOpPayloadSchema = z
 export const itemEditOpPayloadSchema = z
   .object({
     objectType: objectTypeSchema,
-    functionId: nonEmptyString,
+    requirementSetId: nonEmptyString,
     itemId: nonEmptyString,
     values: z.record(primitiveCellValueSchema),
   })
@@ -717,15 +719,15 @@ export const itemEditOpPayloadSchema = z
 export const itemDeleteOpPayloadSchema = z
   .object({
     objectType: objectTypeSchema,
-    functionId: nonEmptyString,
+    requirementSetId: nonEmptyString,
     itemId: nonEmptyString,
   })
   .strict();
 
-export const functionDescriptionOpPayloadSchema = z
+export const requirementSetDescriptionOpPayloadSchema = z
   .object({
     objectType: objectTypeSchema,
-    functionId: nonEmptyString,
+    requirementSetId: nonEmptyString,
     description: z.string(),
   })
   .strict();
@@ -738,7 +740,7 @@ export const roomRestoreOpPayloadSchema = z
   })
   .strict();
 
-export const collabOpSchema = z.discriminatedUnion('kind', [
+export const collabOpSchema = z.preprocess(migrateOp, z.discriminatedUnion('kind', [
   z
     .object({
       opId: nonEmptyString,
@@ -770,8 +772,8 @@ export const collabOpSchema = z.discriminatedUnion('kind', [
   z
     .object({
       opId: nonEmptyString,
-      kind: z.literal('function.description'),
-      payload: functionDescriptionOpPayloadSchema,
+      kind: z.literal('requirementSet.description'),
+      payload: requirementSetDescriptionOpPayloadSchema,
     })
     .strict(),
   z
@@ -788,11 +790,12 @@ export const collabOpSchema = z.discriminatedUnion('kind', [
       payload: roomRestoreOpPayloadSchema,
     })
     .strict(),
-]);
+]));
 
 export const lockHolderSchema = z
   .object({
     userId: nonEmptyString,
+    sessionKey: nonEmptyString,
     name: trimmedName,
     color: z.string().regex(/^#[0-9a-fA-F]{6}$/),
   })
@@ -871,11 +874,21 @@ export const presenceFocusSchema = z
   })
   .strict();
 
+export const presenceCreatingSchema = z
+  .object({
+    objectType: objectTypeSchema,
+    kind: z.enum(['component', 'requirementSet']),
+    parentId: nonEmptyString.nullable(),
+    name: z.string().max(200),
+  })
+  .strict();
+
 export const presenceStateSchema = z
   .object({
     view: presenceViewSchema.nullable(),
     focus: presenceFocusSchema.nullable(),
     drafting: nonEmptyString.nullable(),
+    creating: presenceCreatingSchema.nullable().optional(),
   })
   .strict();
 
@@ -899,6 +912,7 @@ export const presenceUpdateMessageSchema = z
     view: presenceViewSchema.nullable(),
     focus: presenceFocusSchema.nullable(),
     drafting: nonEmptyString.nullable(),
+    creating: presenceCreatingSchema.nullable().optional(),
   })
   .strict();
 
@@ -980,6 +994,8 @@ export const roomWelcomeSchema = z
     type: z.literal('room-welcome'),
     roomId: nonEmptyString,
     role: roomRoleSchema,
+    connectionId: nonEmptyString,
+    sessionKey: nonEmptyString,
     seq: z.number().int().nonnegative(),
     workspace: workspaceSchema,
     locks: z.record(lockHolderSchema),

@@ -1512,7 +1512,7 @@ export class RoomService {
       const content = exportWorkspace(workspace, {
         format: parsed.data.format,
         objectType: parsed.data.objectType,
-        functionId: parsed.data.functionId,
+        requirementSetId: parsed.data.requirementSetId,
       });
       return {
         format: parsed.data.format,

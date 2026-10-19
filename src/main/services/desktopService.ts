@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { editFunction } from './authoringService.js';
+import { authorRequirementSet } from './authoringService.js';
 import { exportWorkspace } from './exportService.js';
 import { mkdir, readdir, rmdir } from 'node:fs/promises';
 import path from 'node:path';
@@ -54,9 +54,9 @@ export class DesktopService {
     await saveWorkspace(this.current.root, workspace);
     this.activate(this.current.root, workspace);
   }
-  async editFunction(input: unknown): Promise<void> {
+  async authorRequirementSet(input: unknown): Promise<void> {
     if (!this.current) throw new Error('Open a project first');
-    const workspace = editFunction(this.current.workspace, input);
+    const workspace = authorRequirementSet(this.current.workspace, input);
     await saveWorkspace(this.current.root, workspace);
     this.activate(this.current.root, workspace);
   }

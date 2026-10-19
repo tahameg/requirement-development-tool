@@ -6,12 +6,12 @@ const prefix = z.string().regex(/^[\p{L}\p{N}_]*$/u, 'Prefixes may contain lette
 const common = { objectType: objectTypeSchema };
 const properties = { name, prefix, description: z.string() };
 export const hierarchyCommandSchema = z.discriminatedUnion('action', [
-  z.object({ ...common, action: z.literal('addModule'), parentId: z.string().min(1).nullable(), ...properties }).strict(),
-  z.object({ ...common, action: z.literal('addFunction'), parentId: z.string().min(1), ...properties, prefix: prefix.min(1, 'Enter a function prefix') }).strict(),
-  z.object({ ...common, action: z.literal('editModule'), id: z.string().min(1), ...properties }).strict(),
-  z.object({ ...common, action: z.literal('editFunction'), id: z.string().min(1), ...properties, prefix: prefix.min(1, 'Enter a function prefix') }).strict(),
-  z.object({ ...common, action: z.literal('deleteModule'), id: z.string().min(1) }).strict(),
-  z.object({ ...common, action: z.literal('deleteFunction'), id: z.string().min(1) }).strict(),
+  z.object({ ...common, action: z.literal('addComponent'), parentId: z.string().min(1).nullable(), ...properties }).strict(),
+  z.object({ ...common, action: z.literal('addRequirementSet'), parentId: z.string().min(1), ...properties, prefix: prefix.min(1, 'Enter a requirement set prefix') }).strict(),
+  z.object({ ...common, action: z.literal('editComponent'), id: z.string().min(1), ...properties }).strict(),
+  z.object({ ...common, action: z.literal('editRequirementSet'), id: z.string().min(1), ...properties, prefix: prefix.min(1, 'Enter a requirement set prefix') }).strict(),
+  z.object({ ...common, action: z.literal('deleteComponent'), id: z.string().min(1) }).strict(),
+  z.object({ ...common, action: z.literal('deleteRequirementSet'), id: z.string().min(1) }).strict(),
 ]);
 export type HierarchyCommand = z.infer<typeof hierarchyCommandSchema>;
-export type HierarchySelection = { objectType: z.infer<typeof objectTypeSchema>; kind: 'root' | 'module' | 'function'; id: string | null };
+export type HierarchySelection = { objectType: z.infer<typeof objectTypeSchema>; kind: 'root' | 'component' | 'requirementSet'; id: string | null };

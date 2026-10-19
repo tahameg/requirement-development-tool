@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { collabOpSchema, presenceStateSchema } from './protocol.js';
 import { objectTypeSchema } from '../types/schema.js';
 const values = z.record(z.union([z.string(), z.number().finite(), z.boolean(), z.null()]));
-export const roomDraftSchema = z.object({ kind: z.enum(['item', 'description']).optional(), opId: z.string().uuid().optional(), objectType: objectTypeSchema, functionId: z.string().min(1), itemId: z.string().nullable(), values, baseValues: values, conflict: z.string().optional() }).strict();
+export const roomDraftSchema = z.object({ kind: z.enum(['item', 'description']).optional(), opId: z.string().uuid().optional(), objectType: objectTypeSchema, requirementSetId: z.string().min(1), itemId: z.string().nullable(), values, baseValues: values, conflict: z.string().optional() }).strict();
 export const collabCommandSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('state') }).strict(),
   z.object({ action: z.literal('discover') }).strict(),
@@ -11,6 +11,7 @@ export const collabCommandSchema = z.discriminatedUnion('action', [
   z.object({ action: z.literal('export') }).strict(),
   z.object({ action: z.literal('import') }).strict(),
   z.object({ action: z.literal('clear-draft') }).strict(),
+  z.object({ action: z.literal('ack-settings-change') }).strict(),
 
   z.object({ action: z.literal('create-from-local'), name: z.string().trim().min(1).max(200), visibility: z.enum(['private', 'listed']) }).strict(),
   z.object({ action: z.literal('probe'), address: z.string().min(1).max(2048) }).strict(),

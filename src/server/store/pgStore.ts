@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import pg from 'pg';
 import type { Workspace } from '../../shared/types/workspace.js';
+import { migrateWorkspace } from '../../shared/types/legacy.js';
 import type {
   InviteKind,
   InviteStatus,
@@ -1049,7 +1050,8 @@ class PgRoomSnapshotRepository implements RoomSnapshotRepository {
     return {
       room_id: row.room_id,
       seq: Number(row.seq),
-      workspace: parseJson<Workspace>(row.workspace),
+      // Rows written before the component rename are upgraded here so every reader sees the current shape.
+      workspace: migrateWorkspace(parseJson<unknown>(row.workspace)) as Workspace,
       created_at: toIso(row.created_at),
     };
   }
@@ -1124,7 +1126,8 @@ class PgRevisionRepository implements RevisionRepository {
       message: row.message,
       author_id: row.author_id,
       author_name: row.author_name,
-      workspace: parseJson<Workspace>(row.workspace),
+      // Rows written before the component rename are upgraded here so every reader sees the current shape.
+      workspace: migrateWorkspace(parseJson<unknown>(row.workspace)) as Workspace,
       snapshot_filename: row.snapshot_filename ?? '',
       restored_from_id: row.restored_from_id ?? null,
       created_at: toIso(row.created_at),

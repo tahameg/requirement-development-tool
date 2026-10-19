@@ -6,6 +6,7 @@
   "scripts": {
     "build": "tsc && node scripts/build-preload.mjs && vite build",
     "typecheck": "tsc --noEmit",
+    "prepare": "git config core.hooksPath .githooks || true",
     "test": "node scripts/run-tests.mjs",
     "server": "node scripts/run-server.mjs",
     "start": "electron . --no-sandbox",

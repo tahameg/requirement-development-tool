@@ -13,23 +13,23 @@ An offline-first desktop requirements authoring tool. `Agents.md` is the product
 - Keep filesystem and database access behind validated IPC calls. The renderer uses context isolation, sandboxing, no Node integration, a bundled CommonJS preload, and a strict local-assets-only Content Security Policy. Network requests, navigation, new windows, and permission requests are denied.
 - Retain Phase 1 immutable IDs, schema validation, human-readable persistence, and interrupted-save recovery.
 
-The sidebar now opens **Requirements, Data Dictionary, Entity and Action**. Open or create a project, select an object type, and use **Add module**. Inside a module, add submodules or function groups. Functions use a distinct **ƒx** badge and cannot contain further groups. **Properties** edits names, prefixes and scope descriptions. Use the row’s **⋯** menu or right-click for context actions.
+The sidebar now opens **Requirements, Data Dictionary, Entity and Action**. Open or create a project, select an object type, and add a **Component**. Inside a component, add **Subcomponents** or **Requirement sets**. Requirement sets hold the items, use a distinct document icon and cannot contain further groups. **Properties** edits names, prefixes and scope descriptions. Use the row’s **⋯** menu or right-click for context actions.
 
-The tree expands/collapses and filters by name, prefix or item ID. Arrow keys navigate it; Enter selects a node. Breadcrumbs let you return to ancestors. Function views show the next available ID and an editable item table. Module/function mutations persist immediately and refresh the SQLite index. Deleting a module requires confirmation, removes its descendants, and retires all contained item IDs. Duplicate function names in the same module are rejected. Existing item IDs remain unchanged when prefixes or names change.
+The tree expands/collapses and filters by name, prefix or item ID. Arrow keys navigate it; Enter selects a node. Breadcrumbs let you return to ancestors. Requirement set views show the next available ID and an editable item table. Component and requirement set changes persist immediately and refresh the SQLite index. Deleting a component requires confirmation, removes its descendants, and retires all contained item IDs. Duplicate requirement set names in the same component are rejected. Existing item IDs remain unchanged when prefixes or names change.
 
 ## Writing and searching
 
-Select a function and click **Add requirement** (or **Add item** for other types). A pending row appears with defaults and an ID preview. Fill required fields and choose **Save changes** or press **Ctrl+S**. IDs are allocated when a valid row is saved; cancelling an unsaved row does not consume an ID. Click any cell to edit its row. **Cancel edits** discards the current draft; saved row deletions require confirmation and permanently retire the ID. The table renders a window of rows so large functions remain usable.
+Select a requirement set and click **Add requirement** (or **Add item** for other types). A pending row appears with defaults and an ID preview. Fill required fields and choose **Save** or press **Ctrl+S**. IDs are allocated when a valid row is saved; cancelling an unsaved row does not consume an ID. Click any cell to edit its row. **Discard** drops the current draft; saved row deletions require confirmation and permanently retire the ID. The table renders a window of rows so large requirement sets remain usable.
 
-Function scope supports Markdown editing and a preview. Raw HTML is ignored; images and links cannot fetch remote content. Valid drafts autosave after the configured idle interval (0 disables autosave). Invalid drafts remain open with a validation error. Navigating away prompts before discarding drafts, and closing/reloading the desktop window protects unsaved edits.
+Requirement set scope supports Markdown editing (Write) and a Preview tab. Raw HTML is ignored; images and links cannot fetch remote content. Valid drafts autosave after the configured idle interval (0 disables autosave). Invalid drafts remain open with a validation error. Navigating away prompts before discarding drafts, and closing/reloading the desktop window protects unsaved edits.
 
-**Project settings** includes object enablement, object prefixes, ID casing, and a column designer. Add, remove, reorder and configure text, Markdown, number, date, boolean, dropdown, or reference fields, including defaults and required rules. Newly added defaults fill existing rows. System columns cannot be removed or have their type/required rule weakened. Removing another column requires confirmation and deletes its values on save. Incompatible type/required changes reject the whole settings update.
+**Project settings** (the **Data definition** screen) includes object enablement, object prefixes, ID casing with a live ID anatomy, a column designer with a table preview, and a change summary that warns before stored values are deleted. Add, remove, reorder and configure text, Markdown, number, date, boolean, dropdown, or reference fields, including defaults and required rules. Newly added defaults fill existing rows. System columns cannot be removed or have their type/required rule weakened. Removing another column requires confirmation and deletes its values on save. Incompatible type/required changes reject the whole settings update.
 
 Add a **reference** column to choose items from Data Dictionary, Entity and Action. Reference cells have a filterable picker and an arrow to open the target. Missing or wrong-type references are rejected; a referenced target or containing group cannot be deleted until incoming links are cleared.
 
-Use **Ctrl+P** or **Ctrl+F** for SQLite full-text search across IDs, function names and field values. Click a result to open its function and highlight the item. Queries match literal words/phrases, and results are capped at 100. A 10,000-item benchmark is tested against the roadmap’s 50 ms search threshold.
+Use **Ctrl+P** or **Ctrl+F** for SQLite full-text search across IDs, requirement set names and field values. Click a result to open its requirement set and highlight the item. Queries match literal words/phrases, and results are capped at 100. A 10,000-item benchmark is tested against the roadmap’s 50 ms search threshold.
 
-Export the current function or entire workspace as **CSV** or **Markdown** using native save dialogs. CSV quotes embedded delimiters/newlines and prefixes formula-like values with an apostrophe for spreadsheet safety. Markdown escapes table delimiters and HTML. Exports use stable column IDs internally and readable column names in headers.
+Export the current requirement set or entire workspace as **CSV** or **Markdown** using native save dialogs. CSV quotes embedded delimiters/newlines and prefixes formula-like values with an apostrophe for spreadsheet safety. Markdown escapes table delimiters and HTML. Exports use stable column IDs internally and readable column names in headers.
 
 ## Distribution and offline development
 
@@ -76,7 +76,7 @@ Once prepared, tests, builds and the app work locally without downloading runtim
 
 `npm test` uses Electron's bundled Node runtime so SQLite tests use the same native ABI as the desktop application; do not rebuild SQLite for your system Node runtime afterward. `npm run test:desktop` launches the real Electron window, exercises the UI and preload, and checks project creation/opening, settings, SQLite, reloads and network blocking. It requires a graphical session and creates only disposable test workspaces. Its screenshot is written to the system temporary directory as `hlr-desktop-smoke.png`.
 
-`npm run test:hierarchy` runs a second real-window regression test: all four sidebar roots, nested module/function creation, duplicate-name validation, breadcrumbs, keyboard navigation, search by item ID, properties, ID immutability, deletion confirmation and persistence after reopening. Its screenshot is saved as `hlr-hierarchy-smoke.png` in the system temporary directory. The suite now has 122 automated tests; the original core ID and validation coverage thresholds remain enforced.
+`npm run test:hierarchy` runs a second real-window regression test: all four sidebar roots, nested component/requirement set creation, duplicate-name validation, breadcrumbs, keyboard navigation, search by item ID, properties, ID immutability, deletion confirmation and persistence after reopening. Its screenshot is saved as `hlr-hierarchy-smoke.png` in the system temporary directory. The suite now has 122 automated tests; the original core ID and validation coverage thresholds remain enforced.
 
 `npm run test:authoring` checks required fields, immutable add/edit/delete behavior, safe Markdown, a custom reference column, link navigation, reference deletion protection, full-text search, exports and reloads in the actual desktop UI.
 
@@ -128,21 +128,21 @@ Linux packaged execution is verified. Windows cross-builds and target-specific o
 After building, run this as an ES module from the project root:
 
 ```js
-import { createWorkspace, addModule, addFunction } from './dist/main/services/workspaceFactory.js';
+import { createWorkspace, addComponent, addRequirementSet } from './dist/main/services/workspaceFactory.js';
 import { addItem } from './dist/main/services/idGenerator.js';
 import { saveWorkspace, loadWorkspace } from './dist/main/services/workspaceService.js';
 
 let workspace = createWorkspace('Guidance System', 'GS');
-workspace = addModule(workspace, 'REQUIREMENT', 'Compiler', 'COMPL');
-const moduleId = workspace.domains.REQUIREMENT.modules[0].id;
-workspace = addFunction(workspace, 'REQUIREMENT', moduleId, 'Create parser', 'CREATE');
-const functionId = workspace.domains.REQUIREMENT.functions[0].functionId;
-workspace = addItem(workspace, 'REQUIREMENT', functionId, {
+workspace = addComponent(workspace, 'REQUIREMENT', 'Compiler', 'COMPL');
+const componentId = workspace.domains.REQUIREMENT.components[0].id;
+workspace = addRequirementSet(workspace, 'REQUIREMENT', componentId, 'Create parser', 'CREATE');
+const requirementSetId = workspace.domains.REQUIREMENT.requirementSets[0].requirementSetId;
+workspace = addItem(workspace, 'REQUIREMENT', requirementSetId, {
   col_desc: 'The parser shall reject invalid input.',
 });
 await saveWorkspace('./Guidance.hlr', workspace);
 const restored = await loadWorkspace('./Guidance.hlr');
-console.log(restored.domains.REQUIREMENT.functions[0].items[0].id);
+console.log(restored.domains.REQUIREMENT.requirementSets[0].items[0].id);
 // REQ-GS-COMPL-CREATE-001
 ```
 
@@ -150,11 +150,13 @@ Files and SQLite access belong exclusively in the Electron main process. The ren
 
 ## Workspace format and guarantees
 
-Each workspace contains `project.config.json` and four domain directories: `requirements`, `data-dictionary`, `entities`, and `actions`. Each domain contains `modules.json` and a `functions` directory. Function files use stable internal UUIDs in their filenames and contain their metadata, description, watermark, and items. All JSON is indented with two spaces.
+Each workspace contains `project.config.json` and four domain directories: `requirements`, `data-dictionary`, `entities`, and `actions`. Each domain contains `components.json` and a `requirement-sets` directory. Requirement set files (`rs-<id>.json`) use stable internal IDs in their filenames and contain their metadata, description, watermark, and items. All JSON is indented with two spaces.
 
-`retired-ids.json` is an additional project-wide tombstone ledger. It prevents a deleted ID being reused by another function after prefix or hierarchy changes. Older external workspaces without this file are accepted with an empty ledger; previously deleted IDs cannot be recovered if both their watermark and tombstone history have been removed. Never lower stored watermarks or discard tombstones when converting data.
+`retired-ids.json` is an additional project-wide tombstone ledger. It prevents a deleted ID being reused by another requirement set after prefix or hierarchy changes. Older external workspaces without this file are accepted with an empty ledger; previously deleted IDs cannot be recovered if both their watermark and tombstone history have been removed. Never lower stored watermarks or discard tombstones when converting data.
 
-Loading validates shapes, columns and values, parent references, cycles, uniqueness, and ID/sequence agreement. Stale watermarks are raised to the largest surviving sequence. Module name paths are derived from stable parent IDs. Existing item IDs are never reconstructed from current prefix settings.
+Loading validates shapes, columns and values, parent references, cycles, uniqueness, and ID/sequence agreement. Stale watermarks are raised to the largest surviving sequence. Component name paths (`componentPath`) are derived from stable parent IDs.
+
+Workspaces written before the component terminology (`modules.json`, `functions/fn-*.json`, `functionId`, `parentModuleId`, `modulePath`) still open. They are upgraded in memory and rewritten in the new layout on the next save, which also removes the legacy files. Requirement set IDs keep their original `fn_` prefix so stored references stay valid; new sets get `rs_`. Existing item IDs are never reconstructed from current prefix settings.
 
 Saves validate a complete snapshot before writing. A flushed `.hlr/pending-save.json` stores the intended snapshot before individual JSON files are atomically replaced. Opening the workspace replays an interrupted save. Invalid recovery journals cause an error rather than being silently discarded. This provides process-interruption recovery; full power-loss durability and filesystem fault guarantees are not claimed. Abandoned uniquely named `.tmp` files are ignored.
 

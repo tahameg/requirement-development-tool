@@ -1,4 +1,4 @@
-import { mkdir, readFile, open, rename, readdir, unlink, lstat } from 'node:fs/promises';
+import { mkdir, readFile, open, rename, readdir, unlink, lstat, rmdir } from 'node:fs/promises';
 import path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import type { Workspace } from '../../shared/types/workspace.js';
@@ -31,21 +31,35 @@ async function materialize(root: string, workspace: Workspace): Promise<void> {
   for (const type of objectTypes) {
     const directory = path.join(root, directories[type]);
     await safeDirectory(directory);
-    const functions = path.join(directory, 'functions');
-    await safeDirectory(functions);
-    await atomicJson(path.join(directory, 'modules.json'), workspace.domains[type].modules);
+    const sets = path.join(directory, 'requirement-sets');
+    await safeDirectory(sets);
+    await atomicJson(path.join(directory, 'components.json'), workspace.domains[type].components);
     const expected = new Set<string>();
-    for (const fn of workspace.domains[type].functions) {
-      const filename = `fn-${fn.functionId}.json`;
+    for (const set of workspace.domains[type].requirementSets) {
+      const filename = `rs-${set.requirementSetId}.json`;
       expected.add(filename);
-      await atomicJson(path.join(functions, filename), fn);
+      await atomicJson(path.join(sets, filename), set);
     }
-    for (const filename of await readdir(functions)) {
-      if (/^fn-.*\.json$/.test(filename) && !expected.has(filename)) await unlink(path.join(functions, filename));
+    for (const filename of await readdir(sets)) {
+      if (/^rs-.*\.json$/.test(filename) && !expected.has(filename)) await unlink(path.join(sets, filename));
     }
+    await removeLegacyLayout(directory);
   }
   await atomicJson(path.join(root, 'project.config.json'), workspace.config);
   await atomicJson(path.join(root, 'retired-ids.json'), workspace.retiredIds);
+}
+/** Pre-component workspaces stored modules.json and functions/fn-*.json; the new files replace them. */
+async function removeLegacyLayout(directory: string): Promise<void> {
+  await unlink(path.join(directory, 'modules.json')).catch(ignoreMissing);
+  const legacy = path.join(directory, 'functions');
+  let files: string[];
+  try { files = await readdir(legacy); } catch (error) { ignoreMissing(error); return; }
+  for (const filename of files) if (/^fn-.*\.json$/.test(filename)) await unlink(path.join(legacy, filename));
+  if (!(await readdir(legacy)).length) await rmdir(legacy);
+}
+function ignoreMissing(error: unknown): void { if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error; }
+async function exists(file: string): Promise<boolean> {
+  try { await lstat(file); return true; } catch (error) { ignoreMissing(error); return false; }
 }
 async function recover(root: string): Promise<void> {
   let pending: unknown;
@@ -73,8 +87,11 @@ export async function loadWorkspace(root: string): Promise<Workspace> {
     const domains: Record<string, unknown> = {};
     for (const type of objectTypes) {
       const directory = path.join(root, directories[type]);
-      const files = (await readdir(path.join(directory, 'functions'))).filter(f => /^fn-.*\.json$/.test(f)).sort();
-      domains[type] = { modules: await readJson(path.join(directory, 'modules.json')), functions: await Promise.all(files.map(f => readJson(path.join(directory, 'functions', f)))) };
+      const legacy = !(await exists(path.join(directory, 'components.json')));
+      const [index, folder, pattern] = legacy ? ['modules.json', 'functions', /^fn-.*\.json$/] : ['components.json', 'requirement-sets', /^rs-.*\.json$/];
+      const files = (await readdir(path.join(directory, folder))).filter(f => pattern.test(f)).sort();
+      // validateWorkspace upgrades the legacy modules/functions shape.
+      domains[type] = { [legacy ? 'modules' : 'components']: await readJson(path.join(directory, index)), [legacy ? 'functions' : 'requirementSets']: await Promise.all(files.map(f => readJson(path.join(directory, folder, f)))) };
     }
     let retiredIds: unknown = [];
     try { retiredIds = await readJson(path.join(root, 'retired-ids.json')); }

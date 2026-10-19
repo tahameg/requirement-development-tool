@@ -27,7 +27,7 @@ import {
   createRoomRequestSchema,
   deleteRoomResponseSchema,
   discoveryBeaconSchema,
-  functionDescriptionOpPayloadSchema,
+  requirementSetDescriptionOpPayloadSchema,
   getRevisionDiffResponseSchema,
   getRevisionResponseSchema,
   getRoomResponseSchema,
@@ -500,10 +500,10 @@ describe('Protocol Schemas (Zod Wire Validation)', () => {
           fromRevisionId: 'rev_1',
           toTarget: 'rev_2',
           configChanged: false,
-          modules: { added: [], modified: [], deleted: [] },
-          functions: { added: [], modified: [], deleted: [] },
+          components: { added: [], modified: [], deleted: [] },
+          requirementSets: { added: [], modified: [], deleted: [] },
           items: {
-            added: [{ id: 'REQ-FCS-001', objectType: 'REQUIREMENT', functionId: 'fn_1' }],
+            added: [{ id: 'REQ-FCS-001', objectType: 'REQUIREMENT', requirementSetId: 'fn_1' }],
             modified: [],
             deleted: [],
           },
@@ -533,24 +533,24 @@ describe('Protocol Schemas (Zod Wire Validation)', () => {
     // Individual op payloads
     const hierPayload = hierarchyOpPayloadSchema.parse({
       objectType: 'REQUIREMENT',
-      action: 'addModule',
+      action: 'addComponent',
       parentId: null,
       name: 'Mod',
       prefix: 'M',
       description: 'Desc',
     });
-    expect(hierPayload.action).toBe('addModule');
+    expect(hierPayload.action).toBe('addComponent');
 
     const itemAddPayload = itemAddOpPayloadSchema.parse({
       objectType: 'REQUIREMENT',
-      functionId: 'fn_1',
+      requirementSetId: 'fn_1',
       values: { col_desc: 'New requirement', col_priority: 1 },
     });
-    expect(itemAddPayload.functionId).toBe('fn_1');
+    expect(itemAddPayload.requirementSetId).toBe('fn_1');
 
     const itemEditPayload = itemEditOpPayloadSchema.parse({
       objectType: 'REQUIREMENT',
-      functionId: 'fn_1',
+      requirementSetId: 'fn_1',
       itemId: 'REQ-001',
       values: { col_desc: 'Updated text' },
     });
@@ -558,14 +558,14 @@ describe('Protocol Schemas (Zod Wire Validation)', () => {
 
     const itemDeletePayload = itemDeleteOpPayloadSchema.parse({
       objectType: 'REQUIREMENT',
-      functionId: 'fn_1',
+      requirementSetId: 'fn_1',
       itemId: 'REQ-001',
     });
     expect(itemDeletePayload.itemId).toBe('REQ-001');
 
-    const fnDescPayload = functionDescriptionOpPayloadSchema.parse({
+    const fnDescPayload = requirementSetDescriptionOpPayloadSchema.parse({
       objectType: 'REQUIREMENT',
-      functionId: 'fn_1',
+      requirementSetId: 'fn_1',
       description: '# Markdown Scope',
     });
     expect(fnDescPayload.description).toBe('# Markdown Scope');
@@ -582,7 +582,7 @@ describe('Protocol Schemas (Zod Wire Validation)', () => {
       { opId: 'op_2', kind: 'item.add', payload: itemAddPayload },
       { opId: 'op_3', kind: 'item.edit', payload: itemEditPayload },
       { opId: 'op_4', kind: 'item.delete', payload: itemDeletePayload },
-      { opId: 'op_5', kind: 'function.description', payload: fnDescPayload },
+      { opId: 'op_5', kind: 'requirementSet.description', payload: fnDescPayload },
       { opId: 'op_6', kind: 'config.update', payload: configPayload },
       { opId: 'op_7', kind: 'room.restore', payload: restorePayload },
     ];
@@ -595,6 +595,7 @@ describe('Protocol Schemas (Zod Wire Validation)', () => {
   it('validates Architecture v2 Locks schemas (acquire, granted, denied, release, heartbeat, force-release, changed)', () => {
     const holder: LockHolder = {
       userId: sampleUser.id,
+      sessionKey: 'sess_1',
       name: sampleUser.displayName,
       color: '#3b82f6',
     };
@@ -684,6 +685,7 @@ describe('Protocol Schemas (Zod Wire Validation)', () => {
     const ws = createWorkspace('Test Project', 'TP');
     const holder: LockHolder = {
       userId: sampleUser.id,
+      sessionKey: 'sess_1',
       name: sampleUser.displayName,
       color: '#3b82f6',
     };
@@ -698,7 +700,7 @@ describe('Protocol Schemas (Zod Wire Validation)', () => {
       kind: 'item.add',
       payload: {
         objectType: 'REQUIREMENT',
-        functionId: 'fn_1',
+        requirementSetId: 'fn_1',
         values: { col_desc: 'New requirement' },
       },
     };
@@ -730,6 +732,8 @@ describe('Protocol Schemas (Zod Wire Validation)', () => {
         type: 'room-welcome',
         roomId: sampleRoomSummary.id,
         role: 'ROOM_OWNER',
+        connectionId: 'conn_1',
+        sessionKey: 'sess_1',
         seq: 10,
         workspace: ws,
         locks: { 'item:REQ-001': holder },
@@ -807,6 +811,8 @@ describe('Protocol Schemas (Zod Wire Validation)', () => {
         type: 'room-welcome',
         roomId: 'r_1',
         role: 'EDITOR',
+        connectionId: 'conn_1',
+        sessionKey: 'sess_1',
         seq: 0,
         workspace: ws,
         locks: {},

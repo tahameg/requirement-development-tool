@@ -9,7 +9,7 @@ import { DesktopService } from '../services/desktopService.js';
 export function registerHandlers(window: BrowserWindow, service: DesktopService, rendererUrl: string): () => void {
   let pending = false;
   const handlers: Record<string, (...args: unknown[]) => Promise<void> | void> = {
-    [channels.editFunction]: command => service.editFunction(command),
+    [channels.authorRequirementSet]: command => service.authorRequirementSet(command),
     [channels.changeHierarchy]: command => service.changeHierarchy(command),
     [channels.state]: () => undefined,
     [channels.createProject]: async (...args) => {

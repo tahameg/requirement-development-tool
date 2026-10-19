@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { WorkspaceIndex } from '../../src/main/db/sqliteClient.js';
-import { createWorkspace, addModule, addFunction } from '../../src/main/services/workspaceFactory.js';
+import { createWorkspace, addComponent, addRequirementSet } from '../../src/main/services/workspaceFactory.js';
 import { addItem } from '../../src/main/services/idGenerator.js';
 import { objectTypes } from '../../src/shared/types/schema.js';
 it('indexes every object type with foreign keys and literal full-text queries; rebuilds a corrupt cache', () => {
@@ -13,11 +13,11 @@ it('indexes every object type with foreign keys and literal full-text queries; r
   try {
     let workspace = createWorkspace('Index');
     for (const type of objectTypes) {
-      workspace = addModule(workspace, type, 'Parent', 'P');
-      workspace = addModule(workspace, type, 'Child', 'C', workspace.domains[type].modules[0]!.id);
-      workspace = addFunction(workspace, type, workspace.domains[type].modules[1]!.id, 'Control', 'CTRL');
-      workspace = addItem(workspace, type, workspace.domains[type].functions[0]!.functionId, type === 'REQUIREMENT' ? { col_desc: 'The parser shall initialize.' } : { col_name: 'parser' });
-      workspace.domains[type].modules.reverse();
+      workspace = addComponent(workspace, type, 'Parent', 'P');
+      workspace = addComponent(workspace, type, 'Child', 'C', workspace.domains[type].components[0]!.id);
+      workspace = addRequirementSet(workspace, type, workspace.domains[type].components[1]!.id, 'Control', 'CTRL');
+      workspace = addItem(workspace, type, workspace.domains[type].requirementSets[0]!.requirementSetId, type === 'REQUIREMENT' ? { col_desc: 'The parser shall initialize.' } : { col_name: 'parser' });
+      workspace.domains[type].components.reverse();
     }
     index = WorkspaceIndex.rebuild(root, workspace);
     expect(index.count()).toBe(4);

@@ -1,0 +1,20 @@
+#!/bin/sh
+# Block commits that would add private keys or server runtime data.
+status=0
+
+paths=$(git diff --cached --name-only --diff-filter=AM | grep -E '(^|/)\.hlr-server-data/|\.key$|(^|/)key\.pem$|-key\.pem$')
+if [ -n "$paths" ]; then
+  echo "pre-commit: refusing to commit secret/runtime files:" >&2
+  echo "$paths" | sed 's/^/  /' >&2
+  status=1
+fi
+
+keys=$(git diff --cached -U0 --diff-filter=AM | grep -nE '^\+-----BEGIN [A-Z ]*PRIVATE KEY-----[[:space:]]*$')
+if [ -n "$keys" ]; then
+  echo "pre-commit: staged changes contain a private key block." >&2
+  git diff --cached --name-only --diff-filter=AM -G '^-----BEGIN [A-Z ]*PRIVATE KEY-----' | sed 's/^/  /' >&2
+  status=1
+fi
+
+[ $status -eq 0 ] || echo "Unstage the file(s) above (git restore --staged <file>)." >&2
+exit $status

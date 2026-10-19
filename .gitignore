@@ -28,3 +28,9 @@ Thumbs.db
 .vscode/
 .idea/
 .collab-logs/
+
+# Server runtime data (TLS private keys, etc.) — never commit
+.hlr-server-data/
+*.key
+key.pem
+*-key.pem
